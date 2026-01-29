@@ -635,17 +635,17 @@ static char* expand_numbers(const char* text) {
 static float get_punctuation_pause_ms(char punct, const CTTSConfig* config) {
     switch (punct) {
         case ',':
-            return config->word_pause_ms * 0.5f;   /* 50% - brief pause */
+            return config->word_pause_ms * 1.8f;   /* 180% - clear pause for breath/continuation */
         case ';':
-            return config->word_pause_ms * 0.7f;   /* 70% - medium pause */
+            return config->word_pause_ms * 2.2f;   /* 220% - longer than comma, clause boundary */
         case ':':
-            return config->word_pause_ms * 0.7f;   /* 70% - medium pause */
+            return config->word_pause_ms * 2.0f;   /* 200% - pause before explanation/list */
         case '.':
-            return config->word_pause_ms * 1.2f;   /* 120% - full pause */
+            return config->word_pause_ms * 3.0f;   /* 300% - full sentence pause */
         case '!':
-            return config->word_pause_ms * 1.3f;   /* 130% - emphatic pause */
+            return config->word_pause_ms * 3.2f;   /* 320% - emphatic full pause */
         case '?':
-            return config->word_pause_ms * 1.2f;   /* 120% - full pause */
+            return config->word_pause_ms * 3.0f;   /* 300% - full pause for question */
         case '-':
             return 0.0f;                            /* No pause (soft separator) */
         default:
@@ -2452,6 +2452,57 @@ typedef enum {
     PHRASE_LISTING          /* Item in a list - rise then fall */
 } PhraseType;
 
+/*
+ * Detect if we're in a listing context (comma-separated items)
+ * Returns 1 if the text appears to be a list, 0 otherwise
+ */
+static int detect_listing_context(const char* text, size_t pos) {
+    /* Look for pattern: word, word, word or word, word e word */
+    int comma_count = 0;
+    size_t len = strlen(text);
+
+    /* Count commas before this position */
+    for (size_t i = 0; i < pos && i < len; i++) {
+        if (text[i] == ',') comma_count++;
+    }
+
+    /* Count commas after this position */
+    for (size_t i = pos; i < len; i++) {
+        if (text[i] == ',') comma_count++;
+    }
+
+    /* If we have 2+ commas, likely a list */
+    return (comma_count >= 2) ? 1 : 0;
+}
+
+/*
+ * Get the phrase type for text leading up to punctuation
+ * This allows applying different prosody before different punctuation marks
+ */
+static PhraseType get_pre_punctuation_phrase_type(const char* text, size_t text_pos) {
+    size_t len = strlen(text);
+
+    /* Find the next punctuation after current position */
+    for (size_t i = text_pos; i < len; i++) {
+        char c = text[i];
+        if (c == '?') return PHRASE_INTERROGATIVE;
+        if (c == '!') return PHRASE_EXCLAMATORY;
+        if (c == ',') {
+            /* Check if this is a listing comma */
+            if (detect_listing_context(text, i)) {
+                return PHRASE_LISTING;
+            }
+            return PHRASE_CONTINUATION;
+        }
+        if (c == ';') return PHRASE_CONTINUATION;
+        if (c == '.') return PHRASE_DECLARATIVE;
+        /* Skip non-punctuation, non-whitespace */
+        if (c != ' ' && c != '\t' && c != '\n') continue;
+    }
+
+    return PHRASE_DECLARATIVE;
+}
+
 typedef struct {
     PhraseType type;
     float pitch_start;      /* Starting pitch factor */
@@ -2465,57 +2516,83 @@ typedef struct {
 /* Get intonation pattern for phrase type */
 static PhraseIntonation get_phrase_intonation(PhraseType type) {
     PhraseIntonation inton;
+    inton.type = type;  /* Store type for later reference */
 
     switch (type) {
         case PHRASE_INTERROGATIVE:
-            /* Question: slight fall then rise at end */
-            inton.pitch_start = 1.0f;
-            inton.pitch_end = 1.15f;    /* Rise at end */
-            inton.pitch_peak = 1.05f;
-            inton.peak_position = 0.3f;
-            inton.energy_factor = 1.0f;
-            inton.final_lengthening = 1.2f;
+            /*
+             * Brazilian Portuguese yes/no question intonation:
+             * Uses a "circumflex" contour - rise through final stressed syllable
+             * with peak (L+H*) followed by slight fall to boundary (L%)
+             * The distinctive rise happens on the nuclear accent (last stressed syllable)
+             */
+            inton.pitch_start = 0.98f;      /* Slight initial dip */
+            inton.pitch_end = 1.08f;        /* End slightly high (after the fall from peak) */
+            inton.pitch_peak = 1.18f;       /* Strong peak on nuclear accent */
+            inton.peak_position = 0.75f;    /* Peak late in phrase (on final stressed syllable) */
+            inton.energy_factor = 1.05f;    /* Slightly more energy */
+            inton.final_lengthening = 1.25f; /* Longer final syllable */
             break;
 
         case PHRASE_EXCLAMATORY:
-            /* Exclamation: high start, falling */
-            inton.pitch_start = 1.12f;
-            inton.pitch_end = 0.95f;
-            inton.pitch_peak = 1.15f;
-            inton.peak_position = 0.2f;
-            inton.energy_factor = 1.15f;
-            inton.final_lengthening = 1.1f;
+            /*
+             * Exclamation intonation:
+             * High pitch onset with expanded pitch range
+             * Fast attack, dramatic fall, increased energy throughout
+             * Peak early, then sustained energy with gradual fall
+             */
+            inton.pitch_start = 1.18f;      /* High start for emphasis */
+            inton.pitch_end = 0.88f;        /* Strong fall to show finality */
+            inton.pitch_peak = 1.22f;       /* Very high peak for drama */
+            inton.peak_position = 0.15f;    /* Peak very early (fast attack) */
+            inton.energy_factor = 1.25f;    /* Significantly more energy (+2dB) */
+            inton.final_lengthening = 1.15f; /* Moderate lengthening */
             break;
 
         case PHRASE_CONTINUATION:
-            /* Continuation (comma): slight rise to indicate more coming */
+            /*
+             * Continuation rise (comma, semicolon):
+             * Signals more content is coming (L-H% boundary)
+             * Pitch rises toward the end to indicate incompleteness
+             * Pre-boundary lengthening on final syllable
+             */
             inton.pitch_start = 1.0f;
-            inton.pitch_end = 1.05f;
-            inton.pitch_peak = 1.02f;
-            inton.peak_position = 0.5f;
-            inton.energy_factor = 0.98f;
-            inton.final_lengthening = 1.1f;
+            inton.pitch_end = 1.12f;        /* Clear rise to signal continuation */
+            inton.pitch_peak = 1.08f;       /* Gradual rise through phrase */
+            inton.peak_position = 0.7f;     /* Peak toward end */
+            inton.energy_factor = 0.95f;    /* Slightly reduced energy */
+            inton.final_lengthening = 1.20f; /* Pre-boundary lengthening */
             break;
 
         case PHRASE_LISTING:
-            /* List item: rise-fall pattern */
+            /*
+             * List item intonation (item1, item2, item3):
+             * Rise-fall pattern on each item
+             * Rising to peak then falling, but not as low as declarative
+             * Maintains listener attention for next item
+             */
             inton.pitch_start = 1.0f;
-            inton.pitch_end = 1.03f;
-            inton.pitch_peak = 1.08f;
-            inton.peak_position = 0.6f;
+            inton.pitch_end = 1.06f;        /* End slightly high (more coming) */
+            inton.pitch_peak = 1.12f;       /* Clear peak for each item */
+            inton.peak_position = 0.55f;    /* Peak in middle of item */
             inton.energy_factor = 1.0f;
-            inton.final_lengthening = 1.05f;
+            inton.final_lengthening = 1.10f;
             break;
 
         case PHRASE_DECLARATIVE:
         default:
-            /* Statement: gradual decline (declination) */
-            inton.pitch_start = 1.02f;
-            inton.pitch_end = 0.92f;
-            inton.pitch_peak = 1.02f;
-            inton.peak_position = 0.1f;
+            /*
+             * Declarative (statement) intonation:
+             * Gradual declination throughout the utterance
+             * Pitch falls from beginning to end
+             * Final lowering signals completion
+             */
+            inton.pitch_start = 1.04f;      /* Start slightly high */
+            inton.pitch_end = 0.88f;        /* Strong final lowering */
+            inton.pitch_peak = 1.04f;       /* Peak at start */
+            inton.peak_position = 0.08f;    /* Peak very early */
             inton.energy_factor = 1.0f;
-            inton.final_lengthening = 1.15f;
+            inton.final_lengthening = 1.18f; /* Final lengthening */
             break;
     }
 
@@ -2525,14 +2602,17 @@ static PhraseIntonation get_phrase_intonation(PhraseType type) {
 /*
  * Apply phrase intonation contour to samples
  * Uses smooth interpolation for natural pitch movement
+ * Handles special patterns for questions (circumflex) and exclamations
  */
 static void apply_phrase_intonation(int16_t* samples, size_t count,
                                      PhraseIntonation* inton,
                                      int word_index, int total_words) {
     if (count < 100 || total_words == 0) return;
 
-    /* Calculate position in phrase */
+    /* Calculate position in phrase (0.0 = first word, 1.0 = last word) */
     float phrase_pos = (float)word_index / (float)(total_words > 1 ? total_words - 1 : 1);
+    int is_final_word = (word_index == total_words - 1);
+    int is_penultimate = (word_index == total_words - 2) && (total_words > 1);
 
     /* Calculate pitch factor at this position using the intonation pattern */
     float pitch_factor;
@@ -2540,7 +2620,7 @@ static void apply_phrase_intonation(int16_t* samples, size_t count,
     if (phrase_pos <= inton->peak_position) {
         /* Before peak: interpolate from start to peak */
         float t = phrase_pos / inton->peak_position;
-        t = t * t * (3.0f - 2.0f * t);  /* Smoothstep */
+        t = t * t * (3.0f - 2.0f * t);  /* Smoothstep for smooth transition */
         pitch_factor = inton->pitch_start + (inton->pitch_peak - inton->pitch_start) * t;
     } else {
         /* After peak: interpolate from peak to end */
@@ -2549,28 +2629,100 @@ static void apply_phrase_intonation(int16_t* samples, size_t count,
         pitch_factor = inton->pitch_peak + (inton->pitch_end - inton->pitch_peak) * t;
     }
 
-    /* Apply energy factor */
-    float energy = inton->energy_factor;
-
-    /* Apply final lengthening for last word */
-    /* (Duration is handled separately) */
-
-    /* Apply smooth pitch contour within this word */
-    /* Word-internal: slight rise then fall for natural contour */
+    /* Calculate word-internal pitch contour - initialize with defaults */
     float word_start = pitch_factor * 0.98f;
     float word_end = pitch_factor * 1.02f;
 
-    /* For final word, apply the phrase-final pitch */
-    if (word_index == total_words - 1) {
-        word_end = inton->pitch_end;
+    /*
+     * Special handling for questions (circumflex pattern on final words):
+     * Brazilian Portuguese yes/no questions have a rise-fall (L+H* L%) pattern
+     * on the final stressed syllable - we apply this to the last 1-2 words
+     */
+    if (inton->type == PHRASE_INTERROGATIVE && (is_final_word || is_penultimate)) {
+        if (is_final_word) {
+            /* Final word: strong rise to peak, then fall */
+            word_start = pitch_factor * 0.95f;   /* Start low */
+            word_end = inton->pitch_end;         /* End at phrase-final pitch */
+            /* Apply circumflex: rise in first 60%, fall in last 40% */
+            size_t rise_samples = (size_t)(count * 0.6f);
+            if (rise_samples > 100 && count - rise_samples > 100) {
+                /* Rising portion */
+                apply_smooth_pitch_contour(samples, rise_samples,
+                                           word_start, inton->pitch_peak);
+                /* Falling portion */
+                apply_smooth_pitch_contour(samples + rise_samples, count - rise_samples,
+                                           inton->pitch_peak, word_end);
+                goto apply_energy;  /* Skip normal contour application */
+            }
+        } else {
+            /* Penultimate word: gradual rise leading to final word */
+            word_start = pitch_factor * 0.98f;
+            word_end = pitch_factor * 1.05f;
+        }
+    }
+    /*
+     * Special handling for exclamations:
+     * Fast attack with high pitch at start, sustained energy
+     */
+    else if (inton->type == PHRASE_EXCLAMATORY) {
+        if (word_index == 0) {
+            /* First word: high attack, slight fall */
+            word_start = inton->pitch_peak;      /* Start at peak */
+            word_end = pitch_factor;             /* Fall to phrase contour */
+        } else if (is_final_word) {
+            /* Final word: continue falling, strong final lowering */
+            word_start = pitch_factor;
+            word_end = inton->pitch_end;
+        } else {
+            /* Middle words: gradual decline */
+            word_start = pitch_factor * 1.02f;
+            word_end = pitch_factor * 0.98f;
+        }
+    }
+    /*
+     * Continuation (comma) - rise at the end to signal more coming
+     */
+    else if (inton->type == PHRASE_CONTINUATION && is_final_word) {
+        /* Clear rise on pre-boundary word */
+        word_start = pitch_factor * 0.96f;
+        word_end = inton->pitch_end;  /* Rise to continuation pitch */
+    }
+    /*
+     * Default word-internal contour
+     */
+    else {
+        /* Slight rise-fall within word for naturalness */
+        word_start = pitch_factor * 0.98f;
+        word_end = pitch_factor * 1.02f;
+
+        /* Final word follows phrase contour to end pitch */
+        if (is_final_word) {
+            word_end = inton->pitch_end;
+        }
     }
 
-    /* Apply the contour */
+    /* Apply the pitch contour */
     apply_smooth_pitch_contour(samples, count, word_start, word_end);
 
+apply_energy:
     /* Apply energy adjustment */
-    if (fabsf(energy - 1.0f) > 0.01f) {
+    if (fabsf(inton->energy_factor - 1.0f) > 0.01f) {
+        /*
+         * For exclamations, apply faster attack (more energy at start)
+         * For questions, keep energy relatively flat
+         */
+        float energy_start = inton->energy_factor;
+        float energy_end = inton->energy_factor;
+
+        if (inton->type == PHRASE_EXCLAMATORY && word_index == 0) {
+            /* Exclamation first word: high energy attack */
+            energy_start = inton->energy_factor * 1.1f;
+            energy_end = inton->energy_factor * 0.95f;
+        }
+
         for (size_t i = 0; i < count; i++) {
+            float t = (float)i / (float)(count - 1);
+            float energy = energy_start + (energy_end - energy_start) * t;
             float s = samples[i] * energy;
             if (s > 32767.0f) s = 32767.0f;
             if (s < -32768.0f) s = -32768.0f;
