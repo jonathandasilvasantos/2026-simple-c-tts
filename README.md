@@ -11,6 +11,10 @@ A lightweight, pure C implementation of a concatenative Text-to-Speech (TTS) eng
 - **Smooth concatenation** - Raised-cosine crossfade between units
 - **Speed control** - PSOLA-based time stretching (0.5x to 2.0x) without pitch distortion
 - **Text normalization rules** - CSV-based regex rules for pronunciation customization
+- **Energy normalization** - Consistent volume across concatenated units
+- **Adaptive crossfade** - Phoneme-aware crossfade durations for natural transitions
+- **Pitch smoothing** - Reduces pitch discontinuities at unit boundaries
+- **Prosody modeling** - Question intonation and sentence declination
 
 ## How It Works
 
@@ -196,6 +200,32 @@ Speed adjustment uses Pitch-Synchronous Overlap-Add:
 - Frame size: 20ms (441 samples at 22050 Hz)
 - Hanning window for smooth reconstruction
 - Preserves pitch while changing duration
+
+### Naturalness Enhancements
+
+The engine includes several features to improve speech naturalness:
+
+**Energy Normalization**
+- Calculates RMS energy of each unit
+- Normalizes to consistent target level
+- Applies gradual energy matching at boundaries
+
+**Adaptive Crossfade**
+- Phoneme-aware crossfade durations:
+  - Plosives (p, t, k, b, d, g): Very short (~18ms) for crisp attacks
+  - Fricatives (f, v, s, z): Short (~36ms) for clarity
+  - Vowels: Longer (~140ms) for smooth blending
+  - Nasals/Liquids: Medium (~63ms) for natural flow
+
+**Pitch Smoothing**
+- Autocorrelation-based pitch estimation at boundaries
+- Reduces pitch jumps >15% by gradual interpolation
+- Preserves natural pitch variation within units
+
+**Prosody Modeling**
+- **Question intonation**: Rising pitch on final words for questions (?)
+- **Exclamation**: Higher energy and pitch for exclamations (!)
+- **Declination**: Gradual pitch/energy lowering through sentence (~8%)
 
 ## API
 

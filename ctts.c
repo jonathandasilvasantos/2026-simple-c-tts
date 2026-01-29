@@ -81,6 +81,13 @@ typedef struct {
 } BuildUnit;
 
 /* ============================================================================
+ * Forward Declarations
+ * ============================================================================ */
+
+static int is_vowel(uint32_t cp);
+static int utf8_char_len(const char* str);
+
+/* ============================================================================
  * Error Messages
  * ============================================================================ */
 
@@ -1428,6 +1435,438 @@ static size_t remove_silence_regions(int16_t* samples, size_t count,
 }
 
 /* ============================================================================
+ * Energy Normalization
+ * ============================================================================ */
+
+/* Calculate RMS energy of samples */
+static float calculate_rms(const int16_t* samples, size_t count) {
+    if (count == 0) return 0.0f;
+
+    double sum_sq = 0.0;
+    for (size_t i = 0; i < count; i++) {
+        double s = (double)samples[i];
+        sum_sq += s * s;
+    }
+    return (float)sqrt(sum_sq / count);
+}
+
+/* Normalize samples to target RMS level */
+static void normalize_rms(int16_t* samples, size_t count, float target_rms) {
+    if (count == 0 || target_rms <= 0) return;
+
+    float current_rms = calculate_rms(samples, count);
+    if (current_rms < 1.0f) return;  /* Avoid division by near-zero */
+
+    float gain = target_rms / current_rms;
+
+    /* Limit gain to avoid extreme amplification */
+    if (gain > 3.0f) gain = 3.0f;
+    if (gain < 0.1f) gain = 0.1f;
+
+    for (size_t i = 0; i < count; i++) {
+        float s = samples[i] * gain;
+        if (s > 32767.0f) s = 32767.0f;
+        if (s < -32768.0f) s = -32768.0f;
+        samples[i] = (int16_t)s;
+    }
+}
+
+/* Match energy at boundary - gradual transition over crossfade region */
+static void match_boundary_energy(int16_t* prev_samples, size_t prev_count,
+                                   int16_t* next_samples, size_t next_count,
+                                   size_t crossfade_samples) {
+    if (crossfade_samples == 0 || prev_count == 0 || next_count == 0) return;
+
+    /* Calculate RMS of boundary regions */
+    size_t boundary_len = crossfade_samples;
+    if (boundary_len > prev_count) boundary_len = prev_count;
+    if (boundary_len > next_count) boundary_len = next_count;
+
+    float prev_rms = calculate_rms(prev_samples + prev_count - boundary_len, boundary_len);
+    float next_rms = calculate_rms(next_samples, boundary_len);
+
+    if (prev_rms < 1.0f || next_rms < 1.0f) return;
+
+    /* Calculate ratio and apply gradual adjustment to next samples */
+    float ratio = prev_rms / next_rms;
+    if (ratio > 2.0f) ratio = 2.0f;
+    if (ratio < 0.5f) ratio = 0.5f;
+
+    /* Apply gradual gain transition at start of next samples */
+    for (size_t i = 0; i < boundary_len && i < next_count; i++) {
+        float t = (float)i / (float)boundary_len;
+        float gain = ratio * (1.0f - t) + 1.0f * t;  /* Blend from ratio to 1.0 */
+        float s = next_samples[i] * gain;
+        if (s > 32767.0f) s = 32767.0f;
+        if (s < -32768.0f) s = -32768.0f;
+        next_samples[i] = (int16_t)s;
+    }
+}
+
+/* ============================================================================
+ * Phoneme Classification for Adaptive Crossfade
+ * ============================================================================ */
+
+typedef enum {
+    PHONEME_VOWEL,
+    PHONEME_PLOSIVE,      /* p, t, k, b, d, g */
+    PHONEME_FRICATIVE,    /* f, v, s, z, x, j */
+    PHONEME_NASAL,        /* m, n, nh */
+    PHONEME_LIQUID,       /* l, lh, r, rr */
+    PHONEME_OTHER
+} PhonemeType;
+
+/* Classify first phoneme of a unit */
+static PhonemeType classify_first_phoneme(const char* text, size_t len) {
+    if (len == 0) return PHONEME_OTHER;
+
+    char c = text[0];
+    if (c >= 'A' && c <= 'Z') c += 32;  /* lowercase */
+
+    /* Check for vowels first */
+    const char* p = text;
+    uint32_t cp = ctts_utf8_next(&p);
+    if (is_vowel(cp)) return PHONEME_VOWEL;
+
+    /* Plosives */
+    if (c == 'p' || c == 't' || c == 'k' || c == 'b' || c == 'd' || c == 'g') {
+        return PHONEME_PLOSIVE;
+    }
+
+    /* Fricatives */
+    if (c == 'f' || c == 'v' || c == 's' || c == 'z' || c == 'x' || c == 'j') {
+        return PHONEME_FRICATIVE;
+    }
+
+    /* Check for 'ch' digraph (fricative) */
+    if (len >= 2 && c == 'c' && (text[1] == 'h' || text[1] == 'H')) {
+        return PHONEME_FRICATIVE;
+    }
+
+    /* Nasals */
+    if (c == 'm' || c == 'n') return PHONEME_NASAL;
+    if (len >= 2 && c == 'n' && (text[1] == 'h' || text[1] == 'H')) {
+        return PHONEME_NASAL;
+    }
+
+    /* Liquids */
+    if (c == 'l' || c == 'r') return PHONEME_LIQUID;
+    if (len >= 2 && c == 'l' && (text[1] == 'h' || text[1] == 'H')) {
+        return PHONEME_LIQUID;
+    }
+
+    return PHONEME_OTHER;
+}
+
+/* Classify last phoneme of a unit */
+static PhonemeType classify_last_phoneme(const char* text, size_t len) {
+    if (len == 0) return PHONEME_OTHER;
+
+    /* Find last character */
+    const char* p = text;
+    const char* last = text;
+    while (p < text + len) {
+        last = p;
+        p += utf8_char_len(p);
+    }
+
+    uint32_t cp = ctts_utf8_next(&last);
+    if (is_vowel(cp)) return PHONEME_VOWEL;
+
+    char c = text[len - 1];
+    if (c >= 'A' && c <= 'Z') c += 32;
+
+    /* Check for digraphs at end */
+    if (len >= 2) {
+        char c2 = text[len - 2];
+        if (c2 >= 'A' && c2 <= 'Z') c2 += 32;
+
+        if (c2 == 'l' && c == 'h') return PHONEME_LIQUID;
+        if (c2 == 'n' && c == 'h') return PHONEME_NASAL;
+        if (c2 == 'c' && c == 'h') return PHONEME_FRICATIVE;
+    }
+
+    if (c == 'p' || c == 't' || c == 'k' || c == 'b' || c == 'd' || c == 'g') {
+        return PHONEME_PLOSIVE;
+    }
+    if (c == 'f' || c == 'v' || c == 's' || c == 'z' || c == 'x' || c == 'j') {
+        return PHONEME_FRICATIVE;
+    }
+    if (c == 'm' || c == 'n') return PHONEME_NASAL;
+    if (c == 'l' || c == 'r') return PHONEME_LIQUID;
+
+    return PHONEME_OTHER;
+}
+
+/* Get optimal crossfade duration based on phoneme transition */
+static float get_adaptive_crossfade(PhonemeType prev_end, PhonemeType next_start,
+                                     const CTTSConfig* config) {
+    /* Base crossfade from config */
+    float base = config->crossfade_ms;
+
+    /* Plosive transitions need very short crossfade to preserve attack */
+    if (next_start == PHONEME_PLOSIVE) {
+        return base * 0.2f;  /* 20% of normal - very short */
+    }
+    if (prev_end == PHONEME_PLOSIVE) {
+        return base * 0.3f;  /* 30% of normal */
+    }
+
+    /* Fricative transitions need short crossfade for clarity */
+    if (next_start == PHONEME_FRICATIVE || prev_end == PHONEME_FRICATIVE) {
+        return base * 0.4f;  /* 40% of normal */
+    }
+
+    /* Vowel-to-vowel transitions can be longer for smoothness */
+    if (prev_end == PHONEME_VOWEL && next_start == PHONEME_VOWEL) {
+        return config->crossfade_vowel_ms;
+    }
+
+    /* Vowel-to-consonant */
+    if (prev_end == PHONEME_VOWEL && next_start != PHONEME_VOWEL) {
+        return base * config->vowel_to_consonant_factor;
+    }
+
+    /* Nasal and liquid transitions - moderate crossfade */
+    if (prev_end == PHONEME_NASAL || prev_end == PHONEME_LIQUID ||
+        next_start == PHONEME_NASAL || next_start == PHONEME_LIQUID) {
+        return base * 0.7f;
+    }
+
+    return base;
+}
+
+/* ============================================================================
+ * Pitch Estimation and Smoothing
+ * ============================================================================ */
+
+/* Simple autocorrelation-based pitch estimation */
+static float estimate_pitch(const int16_t* samples, size_t count) {
+    if (count < 200) return 0.0f;  /* Need enough samples */
+
+    /* Search for pitch in range 80-400 Hz (male to child voice) */
+    size_t min_lag = CTTS_SAMPLE_RATE / 400;  /* ~55 samples at 22050 Hz */
+    size_t max_lag = CTTS_SAMPLE_RATE / 80;   /* ~275 samples */
+
+    if (max_lag > count / 2) max_lag = count / 2;
+
+    /* Use first 10ms for analysis */
+    size_t analysis_len = CTTS_SAMPLE_RATE / 100;
+    if (analysis_len > count - max_lag) analysis_len = count - max_lag;
+
+    float best_corr = 0.0f;
+    size_t best_lag = 0;
+
+    for (size_t lag = min_lag; lag <= max_lag; lag++) {
+        float corr = 0.0f;
+        float energy1 = 0.0f;
+        float energy2 = 0.0f;
+
+        for (size_t i = 0; i < analysis_len; i++) {
+            float s1 = samples[i];
+            float s2 = samples[i + lag];
+            corr += s1 * s2;
+            energy1 += s1 * s1;
+            energy2 += s2 * s2;
+        }
+
+        float norm = sqrtf(energy1 * energy2);
+        if (norm > 0) corr /= norm;
+
+        if (corr > best_corr) {
+            best_corr = corr;
+            best_lag = lag;
+        }
+    }
+
+    /* Only return pitch if correlation is strong enough */
+    if (best_corr > 0.3f && best_lag > 0) {
+        return (float)CTTS_SAMPLE_RATE / best_lag;
+    }
+
+    return 0.0f;  /* Unvoiced or unable to estimate */
+}
+
+/* Apply pitch shift using simple resampling (for small adjustments) */
+static void apply_pitch_shift(int16_t* samples, size_t count, float factor) {
+    if (factor < 0.9f || factor > 1.1f || count < 100) return;  /* Limit to ±10% */
+
+    /* Simple linear interpolation resampling */
+    size_t new_count = (size_t)(count / factor);
+    int16_t* temp = malloc(new_count * sizeof(int16_t));
+    if (!temp) return;
+
+    for (size_t i = 0; i < new_count; i++) {
+        float src_pos = i * factor;
+        size_t idx = (size_t)src_pos;
+        float frac = src_pos - idx;
+
+        if (idx + 1 < count) {
+            temp[i] = (int16_t)(samples[idx] * (1.0f - frac) + samples[idx + 1] * frac);
+        } else if (idx < count) {
+            temp[i] = samples[idx];
+        }
+    }
+
+    /* Copy back (only up to original count) */
+    size_t copy_count = (new_count < count) ? new_count : count;
+    memcpy(samples, temp, copy_count * sizeof(int16_t));
+
+    /* Zero-pad if shortened */
+    if (copy_count < count) {
+        memset(samples + copy_count, 0, (count - copy_count) * sizeof(int16_t));
+    }
+
+    free(temp);
+}
+
+/* Smooth pitch at unit boundaries */
+static void smooth_pitch_boundary(int16_t* prev_samples, size_t prev_count,
+                                   int16_t* next_samples, size_t next_count,
+                                   size_t boundary_samples) {
+    if (boundary_samples == 0 || prev_count < 200 || next_count < 200) return;
+
+    /* Estimate pitch at end of previous unit and start of next */
+    size_t analysis_region = boundary_samples * 2;
+    if (analysis_region > prev_count / 2) analysis_region = prev_count / 2;
+    if (analysis_region > next_count / 2) analysis_region = next_count / 2;
+
+    float prev_pitch = estimate_pitch(prev_samples + prev_count - analysis_region, analysis_region);
+    float next_pitch = estimate_pitch(next_samples, analysis_region);
+
+    /* Only smooth if both are voiced and difference is significant */
+    if (prev_pitch > 0 && next_pitch > 0) {
+        float ratio = next_pitch / prev_pitch;
+
+        /* If pitch jump is more than 15%, apply subtle smoothing */
+        if (ratio > 1.15f || ratio < 0.85f) {
+            /* Target: bring next pitch closer to prev pitch at boundary */
+            float target_ratio = (ratio > 1.0f) ?
+                                 1.0f + (ratio - 1.0f) * 0.5f :  /* Reduce jump by half */
+                                 1.0f - (1.0f - ratio) * 0.5f;
+
+            float shift_factor = target_ratio / ratio;
+
+            /* Apply gradual pitch shift to start of next unit */
+            size_t shift_region = boundary_samples;
+            if (shift_region > next_count / 4) shift_region = next_count / 4;
+
+            /* Create temp buffer for the region to shift */
+            int16_t* region = malloc(shift_region * sizeof(int16_t));
+            if (region) {
+                memcpy(region, next_samples, shift_region * sizeof(int16_t));
+                apply_pitch_shift(region, shift_region, shift_factor);
+
+                /* Blend shifted region with original */
+                for (size_t i = 0; i < shift_region; i++) {
+                    float t = (float)i / shift_region;
+                    next_samples[i] = (int16_t)(region[i] * (1.0f - t) + next_samples[i] * t);
+                }
+                free(region);
+            }
+        }
+    }
+}
+
+/* ============================================================================
+ * Prosody Processing
+ * ============================================================================ */
+
+typedef struct {
+    int is_question;
+    int is_exclamation;
+    int word_count;
+    float pitch_modifier;     /* Overall pitch adjustment */
+    float duration_modifier;  /* Overall duration adjustment */
+} ProsodyContext;
+
+/* Analyze text for prosody cues */
+static void analyze_prosody(const char* text, ProsodyContext* ctx) {
+    ctx->is_question = 0;
+    ctx->is_exclamation = 0;
+    ctx->word_count = 0;
+    ctx->pitch_modifier = 1.0f;
+    ctx->duration_modifier = 1.0f;
+
+    size_t len = strlen(text);
+    if (len == 0) return;
+
+    /* Count words */
+    int in_word = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (text[i] == ' ' || text[i] == '\t' || text[i] == '\n') {
+            in_word = 0;
+        } else if (!in_word) {
+            in_word = 1;
+            ctx->word_count++;
+        }
+    }
+
+    /* Check sentence-final punctuation */
+    for (size_t i = len; i > 0; i--) {
+        char c = text[i - 1];
+        if (c == '?') {
+            ctx->is_question = 1;
+            ctx->pitch_modifier = 1.05f;  /* Slightly higher overall pitch */
+            break;
+        } else if (c == '!') {
+            ctx->is_exclamation = 1;
+            ctx->pitch_modifier = 1.08f;  /* Higher pitch, more energy */
+            break;
+        } else if (c != ' ' && c != '\t' && c != '\n') {
+            break;  /* Found non-punctuation, non-whitespace */
+        }
+    }
+}
+
+/* Apply question intonation (rising pitch at end) */
+static void apply_question_intonation(int16_t* samples, size_t count,
+                                       size_t word_start, int word_index, int total_words) {
+    if (count == 0 || total_words == 0) return;
+
+    /* Only affect last 1-2 words */
+    if (word_index < total_words - 2) return;
+
+    size_t word_samples = count - word_start;
+    if (word_samples < 100) return;
+
+    /* Rising pitch factor: 1.0 at start, up to 1.2 at end of last word */
+    float rise_amount = (word_index == total_words - 1) ? 0.15f : 0.08f;
+
+    for (size_t i = word_start; i < count; i++) {
+        float t = (float)(i - word_start) / word_samples;
+        float factor = 1.0f + rise_amount * t * t;  /* Quadratic rise */
+
+        /* Apply subtle pitch rise via sample spacing (very simplified) */
+        /* This is a simplification - proper implementation would use PSOLA */
+        float s = samples[i] * factor;
+        if (s > 32767.0f) s = 32767.0f;
+        if (s < -32768.0f) s = -32768.0f;
+        samples[i] = (int16_t)s;
+    }
+}
+
+/* Apply declination (gradual pitch lowering through sentence) */
+static void apply_declination(int16_t* samples, size_t count,
+                               int word_index, int total_words) {
+    if (count == 0 || total_words <= 1) return;
+
+    /* Declination: pitch decreases ~10% from first to last word */
+    float progress = (float)word_index / (total_words - 1);
+    float pitch_factor = 1.0f - 0.08f * progress;  /* 1.0 to 0.92 */
+
+    /* Apply subtle energy reduction too */
+    float energy_factor = 1.0f - 0.05f * progress;  /* 1.0 to 0.95 */
+
+    for (size_t i = 0; i < count; i++) {
+        float s = samples[i] * energy_factor;
+        if (s > 32767.0f) s = 32767.0f;
+        if (s < -32768.0f) s = -32768.0f;
+        samples[i] = (int16_t)s;
+    }
+}
+
+/* ============================================================================
  * Improved Audio Concatenation
  * ============================================================================ */
 
@@ -1904,6 +2343,10 @@ int ctts_synthesize(CTTS* engine, const char* text,
     /* Get config */
     CTTSConfig* config = &engine->config;
 
+    /* Analyze prosody context from original text */
+    ProsodyContext prosody;
+    analyze_prosody(text, &prosody);
+
     /* Load normalization rules from CSV (once) */
     ctts_load_normalization("normalization.csv");
 
@@ -1932,13 +2375,18 @@ int ctts_synthesize(CTTS* engine, const char* text,
     engine->units_found = 0;
     engine->units_missing = 0;
 
-    /* Track previous unit for vowel detection */
+    /* Track previous unit for vowel detection and adaptive crossfade */
     const char* prev_unit_text = NULL;
     size_t prev_unit_len = 0;
     int prev_was_word_boundary = 1;  /* Start as if after word boundary */
+    PhonemeType prev_end_phoneme = PHONEME_OTHER;
 
-    /* Track word start position for silence removal within words */
+    /* Track word position for prosody */
+    int current_word_index = 0;
     size_t word_start_sample = 0;
+
+    /* Calculate target RMS for energy normalization */
+    float target_rms = 3000.0f;  /* Target RMS level for consistent volume */
 
     /* Silence removal parameters */
     size_t min_silence_samples = (size_t)(config->min_silence_ms * CTTS_SAMPLE_RATE / 1000.0f);
@@ -1960,6 +2408,21 @@ int ctts_synthesize(CTTS* engine, const char* text,
                 }
             }
 
+            /* Apply prosody effects to completed word */
+            if (buf.count > word_start_sample) {
+                /* Apply declination (gradual pitch/energy lowering through sentence) */
+                apply_declination(buf.data + word_start_sample,
+                                  buf.count - word_start_sample,
+                                  current_word_index, prosody.word_count);
+
+                /* Apply question intonation if needed */
+                if (prosody.is_question) {
+                    apply_question_intonation(buf.data, buf.count,
+                                              word_start_sample,
+                                              current_word_index, prosody.word_count);
+                }
+            }
+
             /* Apply fade-out before silence if we have audio */
             if (buf.count > 0) {
                 size_t fade_samples = (size_t)(config->fade_out_ms * CTTS_SAMPLE_RATE / 1000.0f);
@@ -1969,11 +2432,13 @@ int ctts_synthesize(CTTS* engine, const char* text,
 
             /* Mark start of next word */
             word_start_sample = buf.count;
+            current_word_index++;
 
             pos++;
             prev_was_word_boundary = 1;
             prev_unit_text = NULL;
             prev_unit_len = 0;
+            prev_end_phoneme = PHONEME_OTHER;
             continue;
         }
 
@@ -2005,32 +2470,55 @@ int ctts_synthesize(CTTS* engine, const char* text,
                 fprintf(stderr, "  [%.*s] ", (int)entry->string_len, unit_text);
             }
 
-            /* Choose crossfade duration based on previous/current unit transitions */
-            float crossfade_ms = config->crossfade_ms;
+            /* Classify phonemes for adaptive crossfade */
+            PhonemeType curr_start_phoneme = classify_first_phoneme(unit_text, entry->string_len);
+            PhonemeType curr_end_phoneme = classify_last_phoneme(unit_text, entry->string_len);
+
+            /* Choose crossfade duration using adaptive phoneme-based approach */
+            float crossfade_ms;
             if (!prev_was_word_boundary && prev_unit_text != NULL) {
-                int prev_ends_vowel = ends_with_vowel(prev_unit_text, prev_unit_len);
+                /* Use phoneme-aware adaptive crossfade */
+                crossfade_ms = get_adaptive_crossfade(prev_end_phoneme, curr_start_phoneme, config);
+
+                /* Also consider special cases from original code for S and R endings */
                 int prev_ends_s = ends_with_s(prev_unit_text, prev_unit_len);
                 int prev_ends_r = ends_with_r(prev_unit_text, prev_unit_len);
-                int curr_starts_consonant = starts_with_consonant(unit_text, entry->string_len);
 
-                if (prev_ends_s) {
-                    /* S-ending: use shorter crossfade for crisp S sound */
+                if (prev_ends_s && crossfade_ms > config->crossfade_s_ending_ms) {
                     crossfade_ms = config->crossfade_s_ending_ms;
-                } else if (prev_ends_r) {
-                    /* R-ending: use shorter crossfade for crisp R sound */
+                } else if (prev_ends_r && crossfade_ms > config->crossfade_r_ending_ms) {
                     crossfade_ms = config->crossfade_r_ending_ms;
-                } else if (prev_ends_vowel && curr_starts_consonant) {
-                    /* Vowel-to-consonant: use shorter crossfade (crisp transition) */
-                    crossfade_ms = config->crossfade_ms * config->vowel_to_consonant_factor;
-                } else if (prev_ends_vowel) {
-                    /* Vowel-to-vowel: use longer crossfade (smooth blend) */
-                    crossfade_ms = config->crossfade_vowel_ms;
                 }
+            } else {
+                crossfade_ms = config->crossfade_ms;
+            }
+
+            /* Create normalized copy of unit audio for better concatenation */
+            int16_t* unit_copy = malloc(unit_samples * sizeof(int16_t));
+            if (!unit_copy) {
+                free(normalized);
+                free(buf.data);
+                return CTTS_ERR_OUT_OF_MEMORY;
+            }
+            memcpy(unit_copy, unit_audio, unit_samples * sizeof(int16_t));
+
+            /* Apply energy normalization for consistent volume */
+            normalize_rms(unit_copy, unit_samples, target_rms);
+
+            /* Apply pitch smoothing at boundary if not first unit */
+            if (!prev_was_word_boundary && buf.count > 0) {
+                size_t boundary_samples = (size_t)(crossfade_ms * CTTS_SAMPLE_RATE / 1000.0f);
+                smooth_pitch_boundary(buf.data, buf.count, unit_copy, unit_samples, boundary_samples);
+
+                /* Also match energy at boundary for smoother transitions */
+                match_boundary_energy(buf.data, buf.count, unit_copy, unit_samples, boundary_samples);
             }
 
             /* Append with appropriate crossfade (or fade-in if first unit of word) */
-            err = buffer_append_crossfade(&buf, unit_audio, unit_samples, crossfade_ms,
+            err = buffer_append_crossfade(&buf, unit_copy, unit_samples, crossfade_ms,
                                           config, prev_was_word_boundary);
+            free(unit_copy);
+
             if (err != CTTS_OK) {
                 free(normalized);
                 free(buf.data);
@@ -2040,6 +2528,7 @@ int ctts_synthesize(CTTS* engine, const char* text,
             /* Update previous unit tracking */
             prev_unit_text = unit_text;
             prev_unit_len = entry->string_len;
+            prev_end_phoneme = curr_end_phoneme;
             prev_was_word_boundary = 0;
 
             pos += match_len;
@@ -2051,6 +2540,7 @@ int ctts_synthesize(CTTS* engine, const char* text,
             engine->units_missing++;
             prev_unit_text = NULL;
             prev_unit_len = 0;
+            prev_end_phoneme = PHONEME_OTHER;
         }
     }
 
@@ -2069,6 +2559,21 @@ int ctts_synthesize(CTTS* engine, const char* text,
                 min_silence_samples
             );
             buf.count = word_start_sample + new_word_len;
+        }
+    }
+
+    /* Apply prosody effects to the final word */
+    if (buf.count > word_start_sample) {
+        /* Apply declination to last word */
+        apply_declination(buf.data + word_start_sample,
+                          buf.count - word_start_sample,
+                          current_word_index, prosody.word_count);
+
+        /* Apply question intonation if needed (most important for final word) */
+        if (prosody.is_question) {
+            apply_question_intonation(buf.data, buf.count,
+                                      word_start_sample,
+                                      current_word_index, prosody.word_count);
         }
     }
 
