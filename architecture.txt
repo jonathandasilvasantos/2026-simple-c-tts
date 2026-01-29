@@ -1,0 +1,538 @@
+================================================================================
+                    CONCATENATIVE TTS ENGINE ARCHITECTURE
+                              Version 2.0
+================================================================================
+
+1. OVERVIEW
+--------------------------------------------------------------------------------
+
+This document describes the architecture of a concatenative Text-to-Speech (TTS)
+engine implemented in pure C without external dependencies. The system uses
+unit selection synthesis, where pre-recorded speech units (phonemes, diphones,
+syllables) are concatenated to form continuous speech.
+
+Key Design Goals:
+  - Compact, indexed database for fast unit lookup
+  - Support for monograms (letters), digrams, trigrams, and polygrams
+  - Flexible playback speed without pitch distortion
+  - High-quality concatenation with configurable crossfade
+  - Pure C implementation using only GCC and standard library
+  - YAML-based configuration for easy tuning
+
+
+2. STATE-OF-THE-ART TECHNIQUES EMPLOYED
+--------------------------------------------------------------------------------
+
+2.1 Unit Selection with Look-Ahead
+    The engine uses a greedy longest-match algorithm with 1-step look-ahead
+    to select optimal syllable boundaries. This prevents suboptimal splits
+    like "ex-em-plo" and instead produces "e-xem-plo" which better matches
+    Portuguese phonotactics.
+
+    Selection criteria (in priority order):
+      1. Maximize total coverage (current match + next best match)
+      2. At word end: prefer longer current match (complete syllables)
+      3. Mid-word: prefer longer next match (better syllable boundaries)
+
+2.2 PSOLA (Pitch-Synchronous Overlap-Add)
+    For time-stretching without pitch modification, we implement a simplified
+    PSOLA variant:
+
+    - Divide signal into overlapping frames at pitch-synchronous points
+    - For speed increase: skip frames
+    - For speed decrease: duplicate frames
+    - Overlap-add with Hanning windows for smooth reconstruction
+
+    This allows speed factors from 0.5x to 2.0x while preserving pitch.
+
+2.3 Smooth Crossfade Concatenation
+    When joining units within words, we use raised-cosine crossfade:
+
+    Signal A:  [...samples...][fade-out region]
+    Signal B:                  [fade-in region][...samples...]
+    Result:    [...samples...][crossfaded    ][...samples...]
+
+    Crossfade function (raised cosine):
+      prev_gain = 0.5 * (1 + cos(π * t))    // 1 → 0
+      next_gain = 0.5 * (1 - cos(π * t))    // 0 → 1
+
+    This provides constant-power crossfade, eliminating discontinuities.
+
+2.4 Word Boundary Handling
+    Between words, we insert pure silence (no crossfade) with fade-out/fade-in:
+
+    Word A:    [...samples][fade-out]
+    Silence:                         [pure silence]
+    Word B:                                        [fade-in][...samples]
+
+    This creates natural word separation in synthesized speech.
+
+2.5 DC Offset Removal
+    Each unit has its DC offset computed and removed before concatenation
+    to prevent low-frequency drift that causes "thumping" artifacts.
+
+2.6 Fade-In/Fade-Out
+    Smooth sine-based fades at unit boundaries prevent click artifacts:
+
+    Fade curve: gain = sin(t * π/2)
+
+    - Fade-in applied at start of first unit after silence
+    - Fade-out applied before word boundaries and at end of output
+
+
+3. CONFIGURATION (config.yaml)
+--------------------------------------------------------------------------------
+
+The engine reads settings from config.yaml at runtime:
+
+    # Audio concatenation settings
+    audio:
+      crossfade_ms: 20          # Crossfade between syllables (15-30ms recommended)
+      word_pause_ms: 120        # Silence between words (100-200ms)
+      unknown_silence_ms: 30    # Silence for unknown characters
+      fade_in_ms: 3             # Fade-in at unit start (avoid clicks)
+      fade_out_ms: 3            # Fade-out at unit end (avoid clicks)
+
+    # Signal processing
+    processing:
+      remove_dc_offset: true    # Remove DC offset from units
+      normalize_level: 0.0      # Normalize audio (0=disabled)
+      compression: 0.0          # Apply compression (0=disabled)
+
+    # Synthesis settings
+    synthesis:
+      default_speed: 1.0        # Default speech speed
+      min_speed: 0.5            # Minimum allowed speed
+      max_speed: 2.0            # Maximum allowed speed
+
+    # Debug settings
+    debug:
+      print_units: false        # Print matched units during synthesis
+      print_timing: false       # Print timing information
+
+
+4. DATABASE FORMAT
+--------------------------------------------------------------------------------
+
+4.1 File Structure
+
+    +------------------+
+    | Header (64 B)    |  Magic, version, counts, offsets
+    +------------------+
+    | Index Table      |  Fixed-size entries for O(1) lookup
+    +------------------+
+    | Hash Table       |  For O(1) unit lookup by text
+    +------------------+
+    | String Pool      |  UTF-8 text representations
+    +------------------+
+    | Audio Data       |  Raw PCM samples (16-bit, 22050 Hz)
+    +------------------+
+
+4.2 Header Format (64 bytes)
+
+    Offset  Size  Description
+    ------  ----  -----------
+    0       4     Magic number: "CTTS" (0x53545443 little-endian)
+    4       4     Version (1)
+    8       4     Number of units
+    12      4     Sample rate (22050)
+    16      4     Bits per sample (16)
+    20      4     Index table offset
+    24      4     String pool offset
+    28      4     Audio data offset
+    32      4     Total audio samples
+    36      4     Max unit length (in characters)
+    40      4     Hash table size
+    44      4     Hash table offset
+    48      16    Reserved (zero-filled)
+
+4.3 Index Entry Format (32 bytes per entry)
+
+    Offset  Size  Description
+    ------  ----  -----------
+    0       4     Hash of text (FNV-1a)
+    4       4     String pool offset (UTF-8 text)
+    8       2     String length (bytes)
+    10      2     Character count
+    12      4     Audio data offset (in samples)
+    16      4     Sample count
+    20      4     Flags (reserved)
+    24      4     Next hash chain index (for collision handling)
+    28      4     Reserved
+
+4.4 Hash Function (FNV-1a)
+
+    hash = 2166136261 (FNV_OFFSET_BASIS)
+    for each byte b in text:
+        hash = hash XOR b
+        hash = hash * 16777619 (FNV_PRIME)
+    return hash
+
+
+5. TEXT PROCESSING PIPELINE
+--------------------------------------------------------------------------------
+
+    Input Text
+         |
+         v
+    +-------------------+
+    | Normalization     |  Unicode normalization, lowercase
+    +-------------------+
+         |
+         v
+    +-------------------+
+    | Unit Selection    |  Greedy longest-match with look-ahead
+    +-------------------+
+         |
+         v
+    +-------------------+
+    | Audio Assembly    |  Crossfade syllables, silence between words
+    +-------------------+
+         |
+         v
+    +-------------------+
+    | Time Stretching   |  PSOLA for speed adjustment (if speed ≠ 1.0)
+    +-------------------+
+         |
+         v
+    Output Audio
+
+
+6. CONCATENATION ALGORITHM DETAILS
+--------------------------------------------------------------------------------
+
+6.1 Syllable Crossfade (within words)
+
+    function buffer_append_crossfade(buffer, samples, config):
+        crossfade_samples = config.crossfade_ms * SAMPLE_RATE / 1000
+
+        if buffer.empty:
+            apply_fade_in(samples, config.fade_in_ms)
+            buffer.append(samples)
+        else:
+            // Raised-cosine crossfade
+            for i = 0 to crossfade_samples:
+                t = i / crossfade_samples
+                prev_gain = 0.5 * (1 + cos(π * t))
+                next_gain = 0.5 * (1 - cos(π * t))
+                buffer[end - crossfade + i] =
+                    buffer[end - crossfade + i] * prev_gain +
+                    samples[i] * next_gain
+
+            buffer.append(samples[crossfade_samples:])
+
+6.2 Word Boundary Handling
+
+    function handle_word_boundary(buffer, config):
+        // Fade out current audio
+        apply_fade_out(buffer, config.fade_out_ms)
+
+        // Add pure silence
+        silence_samples = config.word_pause_ms * SAMPLE_RATE / 1000
+        buffer.append_zeros(silence_samples)
+
+6.3 Fade Functions
+
+    function apply_fade_in(samples, duration_ms):
+        fade_samples = duration_ms * SAMPLE_RATE / 1000
+        for i = 0 to fade_samples:
+            gain = sin(i / fade_samples * π / 2)  // Smooth curve
+            samples[i] *= gain
+
+    function apply_fade_out(samples, duration_ms):
+        fade_samples = duration_ms * SAMPLE_RATE / 1000
+        start = length(samples) - fade_samples
+        for i = 0 to fade_samples:
+            gain = sin((fade_samples - i) / fade_samples * π / 2)
+            samples[start + i] *= gain
+
+
+7. PORTUGUESE PRONUNCIATION RULES
+--------------------------------------------------------------------------------
+
+The engine implements Brazilian Portuguese phonological rules for natural
+syllable selection.
+
+7.1 Syllable Structure
+
+Portuguese syllables follow these patterns (most to least common):
+    CV    (60%) - ca, pa, to
+    CVC   (15%) - por, tar, mis
+    V     (8%)  - a, o, e
+    CCV   (rare) - pra, blo, tri
+
+7.2 Rules Implemented
+
+**Rule 1: No Single Consonant at Word Start**
+    At word beginning, consonants must be followed by vowel (CV minimum).
+    REJECT: "b" alone  →  ACCEPT: "bra", "bo", "bem"
+
+**Rule 2: Keep Digraphs Together**
+    Portuguese digraphs are never split:
+    - ch (chá, macho)     - sound: /ʃ/
+    - lh (filho, olho)    - sound: /ʎ/
+    - nh (banho, manhã)   - sound: /ɲ/
+    - qu (que, quero)     - sound: /k/
+    - gu (guerra, água)   - sound: /ɡ/
+
+**Rule 3: Valid Consonant Clusters**
+    Only obstruent + liquid clusters are valid at onset:
+    With /r/: pr, br, tr, dr, cr, gr, fr, vr
+    With /l/: pl, bl, cl, gl, fl
+
+**Rule 4: Open Syllables Preferred**
+    Portuguese prefers syllables ending in vowels.
+    Bonus score given to open syllables.
+
+7.3 Syllable Quality Scoring
+
+    function pt_syllable_score(text, char_count, at_word_start):
+        score = char_count * 10          // Base: prefer longer
+
+        if is_digraph(text):
+            score += 20                   // Digraph bonus
+
+        if is_valid_cluster(text):
+            score += 15                   // Valid cluster bonus
+
+        if at_word_start and single_consonant:
+            score -= 100                  // Heavy penalty
+
+        if starts_with_CV:
+            score += 25                   // CV pattern bonus
+
+        if ends_with_vowel:
+            score += 10                   // Open syllable bonus
+
+        return score
+
+7.4 Examples
+
+    "brasileiro" → [bra] [si] [lei] [ro]
+        - "bra" has valid cluster (br)
+        - All syllables end with vowel (open)
+
+    "trabalho" → [tra] [ba] [lho]
+        - "tra" has valid cluster (tr)
+        - "lho" keeps digraph (lh) together
+
+    "chave" → [cha] [ve]
+        - "cha" keeps digraph (ch) together
+
+    "cidade" → [ci] [da] [de]
+        - "ci" instead of "c" (CV at word start)
+
+    "filho" → [fi] [lho]
+        - "lho" keeps digraph (lh) together
+
+
+8. LOOK-AHEAD UNIT SELECTION
+--------------------------------------------------------------------------------
+
+8.1 Algorithm
+
+    function find_best_match_with_lookahead(text, max_chars, at_word_start):
+        candidates = []
+
+        // Collect valid matches (filtered by Portuguese rules)
+        for length = max_chars down to 1:
+            if find_unit(text[0:length]) exists:
+                if not pt_reject(text[0:length], at_word_start):
+                    candidates.append({
+                        match: text[0:length],
+                        pt_score: pt_syllable_score(text[0:length]),
+                        next_best: find_longest_match(text[length:])
+                    })
+
+        // Select best candidate
+        // Primary: highest Portuguese score
+        // Secondary: maximum coverage (current + next)
+        // Tertiary: tie-breaking rules
+
+        return best
+
+8.2 Example: "exemplo"
+
+    Position 0: candidates = ["ex"(2), "e"(1)]
+      - "ex" → next "em"(2) → total = 4
+      - "e"  → next "xem"(3) → total = 4
+      - Tie: prefer longer next ("xem" > "em") → select "e"
+
+    Position 1: candidates = ["xem"(3), "xe"(2), "x"(1)]
+      - Best = "xem"
+
+    Position 4: candidates = ["plo"(3), "p"(1)]
+      - "plo" → next ""(0) → total = 3
+      - "p"   → next "lo"(2) → total = 3
+      - Tie: "plo" at end → prefer longer current → select "plo"
+
+    Result: "e" + "xem" + "plo" (natural Portuguese syllabification)
+
+
+8. TIME STRETCHING (SPEED CONTROL)
+--------------------------------------------------------------------------------
+
+8.1 PSOLA Implementation
+
+    Frame size:     20ms (441 samples at 22050 Hz)
+    Analysis hop:   Frame size / 4 (110 samples)
+    Synthesis hop:  analysis_hop / speed_factor
+
+8.2 Speed Adjustment Algorithm
+
+    function time_stretch(samples, speed_factor):
+        frame_size = 441
+        analysis_hop = 110
+        synthesis_hop = round(analysis_hop / speed_factor)
+
+        output = zeros(len(samples) / speed_factor)
+        window = hanning(frame_size)
+        norm = zeros(len(output))
+
+        analysis_pos = 0
+        synthesis_pos = 0
+
+        while analysis_pos + frame_size < len(samples):
+            frame = samples[analysis_pos:analysis_pos + frame_size]
+            frame *= window
+            output[synthesis_pos:synthesis_pos + frame_size] += frame
+            norm[synthesis_pos:synthesis_pos + frame_size] += window
+
+            analysis_pos += analysis_hop
+            synthesis_pos += synthesis_hop
+
+        // Normalize
+        output /= norm
+
+        return output
+
+
+9. API DESIGN
+--------------------------------------------------------------------------------
+
+9.1 Configuration
+
+    // Initialize config with defaults
+    void ctts_config_defaults(CTTSConfig* config);
+
+    // Load configuration from YAML file
+    int ctts_load_config(CTTSConfig* config, const char* config_file);
+
+9.2 Database Creation
+
+    // Build database from dataset directory
+    int ctts_build_database(
+        const char* letters_dir,
+        const char* letters_index,
+        const char* syllables_dir,
+        const char* syllables_index,
+        const char* output_file
+    );
+
+9.3 Synthesis
+
+    // Initialize engine with database
+    CTTS* ctts_init(const char* database_file);
+
+    // Synthesize text to audio
+    int ctts_synthesize(
+        CTTS* engine,
+        const char* text,           // Input text (UTF-8)
+        int16_t** samples,          // Output samples (allocated)
+        size_t* sample_count,       // Number of samples
+        float speed                 // Speed factor (0.5 - 2.0)
+    );
+
+    // Write to WAV file
+    int ctts_write_wav(
+        const char* filename,
+        int16_t* samples,
+        size_t sample_count,
+        int sample_rate
+    );
+
+    // Cleanup
+    void ctts_free(CTTS* engine);
+    void ctts_free_samples(int16_t* samples);
+
+9.4 Runtime Configuration
+
+    void ctts_set_crossfade(CTTS* engine, float crossfade_ms);
+    void ctts_set_word_pause(CTTS* engine, float pause_ms);
+    void ctts_set_unknown_silence(CTTS* engine, float silence_ms);
+    void ctts_set_fades(CTTS* engine, float fade_in_ms, float fade_out_ms);
+
+
+10. BUILD AND USAGE
+--------------------------------------------------------------------------------
+
+10.1 Compilation
+
+    make            # Build everything
+    make clean      # Clean build artifacts
+
+10.2 Usage
+
+    # Build database from dataset
+    ./ctts build ./dataset voice.db
+
+    # Synthesize speech (uses config.yaml)
+    ./ctts synth voice.db "olá mundo" output.wav
+
+    # With speed adjustment
+    ./ctts synth voice.db "olá mundo" output.wav 1.5
+
+10.3 Configuration
+
+    Edit config.yaml to adjust:
+    - crossfade_ms: Transition smoothness between syllables
+    - word_pause_ms: Gap between words
+    - fade_in_ms/fade_out_ms: Click prevention
+    - print_units: Debug output
+
+
+11. FILE LAYOUT
+--------------------------------------------------------------------------------
+
+    concatts/
+    ├── architecture.txt      # This document
+    ├── config.yaml           # Runtime configuration
+    ├── Makefile              # Build system
+    ├── ctts.h                # Public API header
+    ├── ctts.c                # Main TTS engine
+    ├── trim_silence.py       # Audio preprocessing tool
+    ├── generate_samples.sh   # Sample generation script
+    ├── dataset/
+    │   ├── letters/
+    │   │   ├── letters.txt   # Index file
+    │   │   └── wavs/         # Letter WAV files (silence-trimmed)
+    │   └── syllables/
+    │       ├── sillabes.txt  # Index file
+    │       └── wavs/         # Syllable WAV files (silence-trimmed)
+    ├── samples/              # Generated sample outputs
+    └── voice.db              # Compiled voice database
+
+
+12. QUALITY TUNING GUIDE
+--------------------------------------------------------------------------------
+
+12.1 For Smoother Transitions
+    - Increase crossfade_ms (try 25-35ms)
+    - Ensure source audio is silence-trimmed (run trim_silence.py)
+
+12.2 For Clearer Consonants
+    - Decrease crossfade_ms (try 10-15ms)
+    - Increase fade_in_ms slightly (5ms)
+
+12.3 For Natural Pacing
+    - Adjust word_pause_ms (100-150ms for conversational)
+    - Use speed factor for overall pace
+
+12.4 For Click-Free Audio
+    - Ensure fade_in_ms and fade_out_ms are at least 2-3ms
+    - Run trim_silence.py on source audio
+
+
+================================================================================
+                              END OF DOCUMENT
+================================================================================

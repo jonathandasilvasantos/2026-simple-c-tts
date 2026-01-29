@@ -1,0 +1,32 @@
+# Generated database
+voice.db
+*.db
+
+# Sample outputs
+/samples/
+
+# Dataset (audio files)
+/dataset/
+
+# Tools directory
+/tools/
+
+# Python scripts
+*.py
+
+# Shell scripts for generation
+generate_samples.sh
+*.sh
+
+# Build artifacts
+*.o
+ctts
+*.wav
+
+# OS files
+.DS_Store
+
+# Python virtual environment
+env/
+venv/
+.venv/

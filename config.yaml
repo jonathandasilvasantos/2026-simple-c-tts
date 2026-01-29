@@ -1,0 +1,90 @@
+# CTTS Configuration File
+# Concatenative Text-to-Speech Engine Settings
+
+# Audio concatenation settings
+audio:
+  # Crossfade duration between syllables within a word (milliseconds)
+  # Higher values = smoother transitions, but may blur consonants
+  # Recommended: 70-100ms for very tight blending
+  crossfade_ms: 90
+
+  # Crossfade duration when previous syllable ends with a vowel (milliseconds)
+  # Vowel endings blend naturally, so longer crossfade sounds smoother
+  # Recommended: 100-150ms for very natural flow
+  crossfade_vowel_ms: 140
+
+  # Crossfade duration when previous syllable ends with 'S' (milliseconds)
+  # S-endings need crisper transitions to sound natural
+  # Recommended: 25-40ms for clear S sounds
+  crossfade_s_ending_ms: 30
+
+  # Crossfade duration when previous syllable ends with 'R' (milliseconds)
+  # R-endings need crisper transitions to sound natural
+  # Recommended: 25-40ms for clear R sounds
+  crossfade_r_ending_ms: 30
+
+  # Crossfade reduction factor when vowel transitions to consonant (0.0-1.0)
+  # Vowel-to-consonant transitions are crisp, so shorter crossfade is better
+  # 0.9 means 90% of normal crossfade duration (minimal reduction = very smooth)
+  vowel_to_consonant_factor: 0.9
+
+  # Remove silence within words (silence only allowed between words)
+  # This detects and removes low-amplitude regions within words
+  remove_word_silence: true
+
+  # Silence detection threshold (0.0-1.0, relative to max amplitude)
+  # Regions below this threshold are considered silence
+  # Higher = less aggressive (keeps more quiet sounds)
+  silence_threshold: 0.04
+
+  # Minimum silence duration to detect (milliseconds)
+  # Shorter silences are ignored - higher value = less cutting
+  min_silence_ms: 35
+
+  # Silence duration between words (milliseconds)
+  # This is pure silence, no crossfade
+  # Recommended: 80-150ms for natural speech
+  word_pause_ms: 100
+
+  # Silence duration for unknown/missing characters (milliseconds)
+  unknown_silence_ms: 30
+
+  # Fade-in duration at the start of each unit (milliseconds)
+  # Helps avoid click artifacts
+  fade_in_ms: 3
+
+  # Fade-out duration at the end of each unit (milliseconds)
+  # Helps avoid click artifacts
+  fade_out_ms: 3
+
+# Signal processing
+processing:
+  # Remove DC offset from audio samples
+  remove_dc_offset: true
+
+  # Normalize audio levels (0.0 = disabled, 0.1-1.0 = target peak level)
+  # 0.8 means normalize to 80% of max amplitude
+  normalize_level: 0.0
+
+  # Apply gentle compression to even out volume
+  # 0.0 = disabled, 1.0 = maximum compression
+  compression: 0.0
+
+# Synthesis settings
+synthesis:
+  # Default speech speed (0.5 = half speed, 2.0 = double speed)
+  default_speed: 1.0
+
+  # Minimum speed allowed
+  min_speed: 0.5
+
+  # Maximum speed allowed
+  max_speed: 2.0
+
+# Debug settings
+debug:
+  # Print matched units during synthesis
+  print_units: false
+
+  # Print timing information
+  print_timing: false
