@@ -10,12 +10,13 @@ A lightweight, pure C implementation of a concatenative Text-to-Speech (TTS) eng
 - **Configurable audio processing** - YAML-based configuration for fine-tuning
 - **Smooth concatenation** - Raised-cosine crossfade between units
 - **Speed control** - PSOLA-based time stretching (0.5x to 2.0x) without pitch distortion
+- **Text normalization rules** - CSV-based regex rules for pronunciation customization
 
 ## How It Works
 
 The engine uses **unit selection synthesis**, where pre-recorded speech units are concatenated to form continuous speech:
 
-1. **Text normalization** - Input text is normalized (lowercase, UTF-8 handling)
+1. **Text normalization** - Applies regex rules from `normalization.csv`, then lowercase conversion
 2. **Unit selection** - Greedy longest-match algorithm with look-ahead selects optimal syllables
 3. **Portuguese rules** - Applies phonological rules (digraphs, valid clusters, CV patterns)
 4. **Audio assembly** - Units are concatenated with smooth crossfade
@@ -29,6 +30,53 @@ The engine implements Brazilian Portuguese pronunciation rules:
 - **Digraph preservation** - Keeps ch, lh, nh, qu, gu together
 - **Valid consonant clusters** - Recognizes pr, br, tr, dr, cr, gr, fr, pl, bl, cl, gl, fl
 - **Open syllable preference** - Favors syllables ending in vowels
+
+## Pronunciation Normalization
+
+The `normalization.csv` file allows you to define custom pronunciation rules using regular expressions. Rules are applied before synthesis to transform input text.
+
+### Format
+
+```csv
+# Comments start with #
+pattern,replacement
+```
+
+### Features
+
+- **POSIX Extended Regex** - Full regex support for patterns
+- **Word boundaries** - Use `\b` for portable word boundary matching
+- **Backreferences** - Use `\1`, `\2`, etc. in replacements to preserve captured groups
+
+### Example Rules
+
+```csv
+# Words starting with 'r' get double 'r' sound
+\br,rr
+
+# 's' between vowels becomes 'z' sound (Brazilian Portuguese)
+([a-z])sa,\1za
+([a-z])se,\1ze
+([a-z])si,\1zi
+([a-z])so,\1zo
+([a-z])su,\1zu
+
+# Word-final 't' gets 'i' sound
+t\b,ti
+
+# Specific word replacements
+música,muzica
+brasil,brazil
+```
+
+### How It Works
+
+| Input | Rule Applied | Output |
+|-------|--------------|--------|
+| rosa | `\br,rr` | rrosa |
+| casa | `([a-z])sa,\1za` | caza |
+| preciso | `([a-z])so,\1zo` | precizo |
+| internet | `t\b,ti` | interneti |
 
 ## Building
 
@@ -163,6 +211,11 @@ int ctts_synthesize(CTTS* engine, const char* text,
 // Write WAV file
 int ctts_write_wav(const char* filename, const int16_t* samples,
                    size_t sample_count, int sample_rate);
+
+// Normalization rules (loaded automatically from normalization.csv)
+int ctts_load_normalization(const char* csv_file);
+char* ctts_apply_normalization(const char* text);
+void ctts_free_normalization(void);
 
 // Cleanup
 void ctts_free(CTTS* engine);

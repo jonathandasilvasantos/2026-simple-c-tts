@@ -18,6 +18,7 @@ Key Design Goals:
   - High-quality concatenation with configurable crossfade
   - Pure C implementation using only GCC and standard library
   - YAML-based configuration for easy tuning
+  - CSV-based pronunciation rules with regex support
 
 
 2. STATE-OF-THE-ART TECHNIQUES EMPLOYED
@@ -176,7 +177,12 @@ The engine reads settings from config.yaml at runtime:
          |
          v
     +-------------------+
-    | Normalization     |  Unicode normalization, lowercase
+    | CSV Normalization |  Apply regex rules from normalization.csv
+    +-------------------+
+         |
+         v
+    +-------------------+
+    | Lowercase         |  Unicode-aware lowercase conversion
     +-------------------+
          |
          v
@@ -196,6 +202,65 @@ The engine reads settings from config.yaml at runtime:
          |
          v
     Output Audio
+
+
+5.1 CSV-Based Normalization Rules (normalization.csv)
+--------------------------------------------------------------------------------
+
+The engine supports custom pronunciation rules defined in a CSV file. Rules are
+applied before synthesis to transform input text for correct pronunciation.
+
+File Format:
+    # Comments start with #
+    pattern,replacement
+
+Features:
+    - POSIX Extended Regular Expressions (ERE)
+    - Portable word boundary syntax: \b (auto-converted to platform-specific)
+    - Backreference support: \1, \2, etc. in replacements
+    - Rules applied in order (first match wins per rule)
+
+Example Rules (Brazilian Portuguese):
+
+    # Words starting with 'r' get double 'r' sound
+    \br,rr
+
+    # 's' between vowels becomes 'z' sound
+    ([a-z])sa,\1za
+    ([a-z])se,\1ze
+    ([a-z])si,\1zi
+    ([a-z])so,\1zo
+    ([a-z])su,\1zu
+
+    # Word-final 't' gets 'i' sound
+    t\b,ti
+
+    # Specific word corrections
+    música,muzica
+    brasil,brazil
+
+Implementation Details:
+
+    1. Word Boundary Conversion
+       The \b escape is automatically converted to platform-specific syntax:
+       - macOS/BSD: [[:<:]] (word start) or [[:>:]] (word end)
+       - Linux: \b (native support)
+
+    2. Backreference Support
+       Capture groups in patterns can be referenced in replacements:
+       Pattern: ([a-z])sa    Matches: "casa" captures "c"
+       Replace: \1za         Result:  "caza" (preserves "c")
+
+    3. Rule Application Order
+       Rules are applied sequentially. Each rule processes the entire text
+       before the next rule is applied. This allows chaining transformations.
+
+Example Transformation:
+    Input:    "rosa preciso"
+    Rule 1:   \br,rr           → "rrosa preciso"
+    Rule 2:   ([a-z])sa,\1za   → "rroza precizo"
+    Rule 3:   ([a-z])so,\1zo   → "rroza precizo"
+    Output:   "rroza precizo"
 
 
 6. CONCATENATION ALGORITHM DETAILS
@@ -462,6 +527,20 @@ Portuguese syllables follow these patterns (most to least common):
     void ctts_set_unknown_silence(CTTS* engine, float silence_ms);
     void ctts_set_fades(CTTS* engine, float fade_in_ms, float fade_out_ms);
 
+9.5 Text Normalization
+
+    // Load normalization rules from CSV file
+    // Format: pattern,replacement (one per line)
+    // Called automatically by ctts_synthesize()
+    int ctts_load_normalization(const char* csv_file);
+
+    // Apply loaded rules to text
+    // Returns newly allocated string (caller must free)
+    char* ctts_apply_normalization(const char* text);
+
+    // Free compiled regex patterns
+    void ctts_free_normalization(void);
+
 
 10. BUILD AND USAGE
 --------------------------------------------------------------------------------
@@ -497,11 +576,13 @@ Portuguese syllables follow these patterns (most to least common):
     concatts/
     ├── architecture.txt      # This document
     ├── config.yaml           # Runtime configuration
+    ├── normalization.csv     # Pronunciation rules (regex-based)
     ├── Makefile              # Build system
     ├── ctts.h                # Public API header
     ├── ctts.c                # Main TTS engine
     ├── trim_silence.py       # Audio preprocessing tool
     ├── generate_samples.sh   # Sample generation script
+    ├── regen.sh              # Regenerate database and samples
     ├── dataset/
     │   ├── letters/
     │   │   ├── letters.txt   # Index file

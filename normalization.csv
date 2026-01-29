@@ -1,0 +1,12 @@
+# Normalization rules: pattern,replacement (one per line)
+# Supports POSIX Extended Regex, use \b for word boundaries
+# Use \1, \2, etc. for backreferences in replacements
+\br,rr
+música,muzica
+brasil,brazil
+t\b,ti
+([a-z])sa,\1za
+([a-z])se,\1ze
+([a-z])si,\1zi
+([a-z])so,\1zo
+([a-z])su,\1zu

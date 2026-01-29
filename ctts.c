@@ -14,8 +14,26 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <regex.h>
 
 #include "ctts.h"
+
+/* ============================================================================
+ * Normalization Rules (loaded from CSV)
+ * ============================================================================ */
+
+#define MAX_NORM_RULES 256
+#define MAX_REPLACE_LEN 256
+
+typedef struct {
+    regex_t regex;
+    char replace[MAX_REPLACE_LEN];
+    int compiled;
+} NormRule;
+
+static NormRule norm_rules[MAX_NORM_RULES];
+static size_t norm_rule_count = 0;
+static int norm_rules_loaded = 0;
 
 /* ============================================================================
  * Internal Constants
@@ -204,6 +222,236 @@ char* ctts_normalize(const char* text) {
     *dst = '\0';
 
     return result;
+}
+
+/* ============================================================================
+ * Normalization Rules from CSV
+ * ============================================================================ */
+
+/* Convert portable \b word boundary to platform-specific syntax */
+static char* convert_word_boundaries(const char* pattern) {
+    /* Count how many \b we need to replace */
+    size_t count = 0;
+    const char* p = pattern;
+    while ((p = strstr(p, "\\b")) != NULL) {
+        count++;
+        p += 2;
+    }
+
+    if (count == 0) {
+        return strdup(pattern);
+    }
+
+    /* [[:<:]] and [[:>:]] are 7 chars, \b is 2 chars, so we need 5 extra per replacement */
+    size_t new_len = strlen(pattern) + count * 5 + 1;
+    char* result = malloc(new_len);
+    if (!result) return strdup(pattern);
+
+    const char* src = pattern;
+    char* dst = result;
+
+    while (*src) {
+        if (src[0] == '\\' && src[1] == 'b') {
+            /* Check context: if followed by alphanumeric, it's word start
+               otherwise it's word end */
+            char next_char = src[2];
+            if ((next_char >= 'a' && next_char <= 'z') ||
+                (next_char >= 'A' && next_char <= 'Z') ||
+                (next_char >= '0' && next_char <= '9') ||
+                next_char == '[' || next_char == '(') {
+                /* Word start boundary */
+                memcpy(dst, "[[:<:]]", 7);
+                dst += 7;
+            } else {
+                /* Word end boundary */
+                memcpy(dst, "[[:>:]]", 7);
+                dst += 7;
+            }
+            src += 2;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
+
+    return result;
+}
+
+/* Load normalization rules from CSV file */
+int ctts_load_normalization(const char* csv_file) {
+    if (norm_rules_loaded) {
+        /* Already loaded, skip */
+        return CTTS_OK;
+    }
+
+    FILE* f = fopen(csv_file, "r");
+    if (!f) {
+        /* File not found is OK - just no rules */
+        norm_rules_loaded = 1;
+        return CTTS_OK;
+    }
+
+    char line[512];
+    norm_rule_count = 0;
+
+    while (fgets(line, sizeof(line), f) && norm_rule_count < MAX_NORM_RULES) {
+        /* Remove trailing newline */
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
+            line[--len] = '\0';
+        }
+
+        /* Skip empty lines and comments */
+        if (len == 0) continue;
+        if (line[0] == '#') continue;
+
+        /* Find the comma separator */
+        char* comma = strchr(line, ',');
+        if (!comma) continue;
+
+        /* Split into pattern and replacement */
+        *comma = '\0';
+        const char* pattern = line;
+        const char* replace = comma + 1;
+
+        /* Convert portable \b to platform-specific word boundaries */
+        char* converted_pattern = convert_word_boundaries(pattern);
+        if (!converted_pattern) continue;
+
+        /* Compile the regex */
+        NormRule* rule = &norm_rules[norm_rule_count];
+        int err = regcomp(&rule->regex, converted_pattern, REG_EXTENDED);
+        if (err != 0) {
+            fprintf(stderr, "Warning: Invalid regex pattern '%s' (converted from '%s')\n",
+                    converted_pattern, pattern);
+            free(converted_pattern);
+            continue;
+        }
+        free(converted_pattern);
+
+        strncpy(rule->replace, replace, MAX_REPLACE_LEN - 1);
+        rule->replace[MAX_REPLACE_LEN - 1] = '\0';
+        rule->compiled = 1;
+        norm_rule_count++;
+    }
+
+    fclose(f);
+    norm_rules_loaded = 1;
+
+    if (norm_rule_count > 0) {
+        fprintf(stderr, "Loaded %zu normalization rules\n", norm_rule_count);
+    }
+
+    return CTTS_OK;
+}
+
+/* Apply replacement with backreference support (\1, \2, etc.) */
+static size_t apply_replacement(char* dst, size_t dst_remaining,
+                                const char* replace, const char* src,
+                                regmatch_t* matches, size_t nmatch) {
+    size_t written = 0;
+    const char* r = replace;
+
+    while (*r && written < dst_remaining) {
+        if (r[0] == '\\' && r[1] >= '0' && r[1] <= '9') {
+            /* Backreference */
+            size_t group = r[1] - '0';
+            if (group < nmatch && matches[group].rm_so >= 0) {
+                size_t group_len = matches[group].rm_eo - matches[group].rm_so;
+                if (group_len > dst_remaining - written) {
+                    group_len = dst_remaining - written;
+                }
+                memcpy(dst + written, src + matches[group].rm_so, group_len);
+                written += group_len;
+            }
+            r += 2;
+        } else {
+            dst[written++] = *r++;
+        }
+    }
+
+    return written;
+}
+
+/* Apply normalization rules to text */
+char* ctts_apply_normalization(const char* text) {
+    if (norm_rule_count == 0) {
+        return strdup(text);
+    }
+
+    /* Work buffer - start with copy of input */
+    size_t buf_size = strlen(text) * 4 + 1024;  /* Extra space for expansions */
+    char* current = malloc(buf_size);
+    char* next = malloc(buf_size);
+    if (!current || !next) {
+        free(current);
+        free(next);
+        return strdup(text);
+    }
+
+    strcpy(current, text);
+
+    /* Apply each rule */
+    for (size_t i = 0; i < norm_rule_count; i++) {
+        NormRule* rule = &norm_rules[i];
+        if (!rule->compiled) continue;
+
+        #define MAX_GROUPS 10
+        regmatch_t matches[MAX_GROUPS];
+        char* src = current;
+        char* dst = next;
+        size_t dst_remaining = buf_size - 1;
+
+        while (*src && dst_remaining > 0) {
+            if (regexec(&rule->regex, src, MAX_GROUPS, matches, 0) == 0 && matches[0].rm_so >= 0) {
+                /* Copy text before match */
+                size_t before_len = (size_t)matches[0].rm_so;
+                if (before_len > dst_remaining) before_len = dst_remaining;
+                memcpy(dst, src, before_len);
+                dst += before_len;
+                dst_remaining -= before_len;
+
+                /* Apply replacement with backreference support */
+                size_t replace_len = apply_replacement(dst, dst_remaining,
+                                                       rule->replace, src,
+                                                       matches, MAX_GROUPS);
+                dst += replace_len;
+                dst_remaining -= replace_len;
+
+                /* Advance past matched portion */
+                src += matches[0].rm_eo;
+                if (matches[0].rm_eo == 0) src++;  /* Avoid infinite loop on zero-length match */
+            } else {
+                /* No more matches, copy rest */
+                size_t rest_len = strlen(src);
+                if (rest_len > dst_remaining) rest_len = dst_remaining;
+                memcpy(dst, src, rest_len);
+                dst += rest_len;
+                break;
+            }
+        }
+        *dst = '\0';
+
+        /* Swap buffers for next iteration */
+        char* tmp = current;
+        current = next;
+        next = tmp;
+    }
+
+    free(next);
+    return current;
+}
+
+/* Free normalization rules */
+void ctts_free_normalization(void) {
+    for (size_t i = 0; i < norm_rule_count; i++) {
+        if (norm_rules[i].compiled) {
+            regfree(&norm_rules[i].regex);
+            norm_rules[i].compiled = 0;
+        }
+    }
+    norm_rule_count = 0;
+    norm_rules_loaded = 0;
 }
 
 /* ============================================================================
@@ -667,6 +915,9 @@ void ctts_free(CTTS* engine) {
         close(engine->db_fd);
     }
     free(engine);
+
+    /* Clean up normalization rules */
+    ctts_free_normalization();
 }
 
 void ctts_free_samples(int16_t* samples) {
@@ -1653,8 +1904,16 @@ int ctts_synthesize(CTTS* engine, const char* text,
     /* Get config */
     CTTSConfig* config = &engine->config;
 
-    /* Normalize text */
-    char* normalized = ctts_normalize(text);
+    /* Load normalization rules from CSV (once) */
+    ctts_load_normalization("normalization.csv");
+
+    /* Apply CSV normalization rules first (regex replacements) */
+    char* rule_normalized = ctts_apply_normalization(text);
+    if (!rule_normalized) return CTTS_ERR_OUT_OF_MEMORY;
+
+    /* Then apply standard normalization (lowercase) */
+    char* normalized = ctts_normalize(rule_normalized);
+    free(rule_normalized);
     if (!normalized) return CTTS_ERR_OUT_OF_MEMORY;
 
     /* Initialize output buffer */

@@ -305,6 +305,24 @@ uint32_t ctts_hash(const char* str, size_t len);
  */
 char* ctts_normalize(const char* text);
 
+/*
+ * Load normalization rules from CSV file
+ * Format: regex_pattern,replacement (one per line, no header)
+ * Returns 0 on success
+ */
+int ctts_load_normalization(const char* csv_file);
+
+/*
+ * Apply normalization rules to text
+ * Returns allocated string that caller must free
+ */
+char* ctts_apply_normalization(const char* text);
+
+/*
+ * Free normalization rules
+ */
+void ctts_free_normalization(void);
+
 /* ============================================================================
  * Error Codes
  * ============================================================================ */
