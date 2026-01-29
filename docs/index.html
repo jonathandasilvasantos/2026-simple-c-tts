@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CTTS - Sintetizador de Voz para Português Brasileiro</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --card-bg: #161b22;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --text-muted: #8b949e;
+            --accent: #58a6ff;
+            --green: #3fb950;
+            --yellow: #d29922;
+            --purple: #a371f7;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            padding: 3rem 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 2rem;
+        }
+
+        .flag {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+
+        .subtitle {
+            color: var(--text-muted);
+            font-size: 1.2rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .badges {
+            display: flex;
+            justify-content: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .badge {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            padding: 0.25rem 0.75rem;
+            border-radius: 2rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .badge.green { border-color: var(--green); color: var(--green); }
+        .badge.yellow { border-color: var(--yellow); color: var(--yellow); }
+        .badge.purple { border-color: var(--purple); color: var(--purple); }
+
+        .intro {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .intro h2 {
+            color: var(--green);
+            margin-bottom: 1rem;
+            font-size: 1.3rem;
+        }
+
+        .intro p {
+            color: var(--text-muted);
+            margin-bottom: 0.75rem;
+        }
+
+        .intro ul {
+            color: var(--text-muted);
+            margin-left: 1.5rem;
+        }
+
+        .intro li {
+            margin-bottom: 0.5rem;
+        }
+
+        section {
+            margin-bottom: 3rem;
+        }
+
+        h2 {
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        h2 .icon {
+            font-size: 1.2rem;
+        }
+
+        .section-desc {
+            color: var(--text-muted);
+            margin-bottom: 1.5rem;
+            font-size: 0.95rem;
+        }
+
+        .samples-grid {
+            display: grid;
+            gap: 1rem;
+        }
+
+        .sample {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+        }
+
+        .sample-text {
+            color: var(--accent);
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .sample-info {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            margin-bottom: 0.75rem;
+        }
+
+        audio {
+            width: 100%;
+            height: 36px;
+        }
+
+        .speed-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+
+        .speed-sample {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+            text-align: center;
+        }
+
+        .speed-label {
+            color: var(--yellow);
+            font-size: 1.2rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+        }
+
+        footer {
+            text-align: center;
+            padding: 2rem 0;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+        }
+
+        footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        footer a:hover {
+            text-decoration: underline;
+        }
+
+        .github-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 0.75rem 1.5rem;
+            border-radius: 6px;
+            text-decoration: none;
+            margin-top: 1rem;
+            transition: border-color 0.2s;
+        }
+
+        .github-btn:hover {
+            border-color: var(--accent);
+            text-decoration: none;
+        }
+
+        .github-btn svg {
+            fill: currentColor;
+        }
+
+        .tech-details {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .tech-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+        }
+
+        .tech-card h3 {
+            color: var(--purple);
+            font-size: 1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .tech-card p {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        .repo-highlight {
+            background: linear-gradient(135deg, #1a1f2e 0%, #0d1117 100%);
+            border: 2px solid var(--accent);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin: 2rem 0;
+            text-align: center;
+        }
+
+        .repo-highlight h3 {
+            color: #fff;
+            margin-bottom: 0.75rem;
+            font-size: 1.2rem;
+        }
+
+        .repo-url {
+            display: inline-block;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            padding: 0.75rem 1.5rem;
+            border-radius: 6px;
+            font-family: 'SF Mono', 'Consolas', monospace;
+            font-size: 1rem;
+            color: var(--accent);
+            word-break: break-all;
+            margin-bottom: 1rem;
+        }
+
+        .repo-url a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .repo-url a:hover {
+            text-decoration: underline;
+        }
+
+        .license-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: var(--card-bg);
+            border: 1px solid var(--green);
+            color: var(--green);
+            padding: 0.5rem 1rem;
+            border-radius: 2rem;
+            font-size: 0.9rem;
+            margin-top: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="flag">&#127463;&#127479;</div>
+            <h1>CTTS</h1>
+            <p class="subtitle">Sintetizador de Voz Concatenativo para Português Brasileiro</p>
+            <div class="badges">
+                <span class="badge green">100% C Puro</span>
+                <span class="badge yellow">Zero Dependências</span>
+                <span class="badge purple">Código Aberto</span>
+                <span class="badge">Português Brasileiro</span>
+            </div>
+        </header>
+
+        <div class="intro">
+            <h2>Por que CTTS?</h2>
+            <p>O português brasileiro tem características únicas que sistemas TTS genéricos não capturam bem:</p>
+            <ul>
+                <li><strong>Pronúncia do R inicial</strong> - "rosa" soa como "rrosa" (som de RR)</li>
+                <li><strong>S entre vogais</strong> - "casa" soa como "caza" (som de Z)</li>
+                <li><strong>T final</strong> - "internet" soa como "interneti" (som de TI)</li>
+                <li><strong>Entonação de perguntas</strong> - subida melódica no final</li>
+                <li><strong>Vogais abertas e fechadas</strong> - distinção fonêmica importante</li>
+            </ul>
+            <p style="margin-top: 1rem;">O CTTS foi desenvolvido especificamente para essas necessidades, usando síntese concatenativa com unidades de fala gravadas por falantes nativos.</p>
+        </div>
+
+        <div class="repo-highlight">
+            <h3>Repositorio do Projeto</h3>
+            <div class="repo-url">
+                <a href="https://github.com/jonathandasilvasantos/2026-simple-c-tts">https://github.com/jonathandasilvasantos/2026-simple-c-tts</a>
+            </div>
+            <br>
+            <span class="license-badge">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8.75.75V2h.985c.304 0 .603.08.867.231l1.29.736c.038.022.08.033.124.033h2.234a.75.75 0 0 1 0 1.5h-.427l2.111 4.692a.75.75 0 0 1-.154.838l-.53-.53.529.531-.001.002-.002.002-.006.006-.015.014-.045.04a3.514 3.514 0 0 1-.686.45A4.492 4.492 0 0 1 13 10c-.88 0-1.556-.22-2.023-.454a3.515 3.515 0 0 1-.686-.45l-.045-.04-.015-.014-.006-.006-.004-.004-.001-.001a.75.75 0 0 1-.154-.838L12.178 3.5h-.936a.75.75 0 0 1-.35-.087l-1.29-.736a.25.25 0 0 0-.118-.032H8.75V13h2.5a.75.75 0 0 1 0 1.5h-6.5a.75.75 0 0 1 0-1.5h2.5V2.75H6.218a.25.25 0 0 0-.118.032l-1.29.736a.75.75 0 0 1-.35.087h-.936l2.111 4.692a.75.75 0 0 1-.154.838l-.53-.53.529.531-.001.002-.002.002-.006.006-.015.014-.045.04a3.517 3.517 0 0 1-.686.45A4.492 4.492 0 0 1 3 10c-.88 0-1.556-.22-2.023-.454a3.512 3.512 0 0 1-.686-.45l-.045-.04-.015-.014-.006-.006-.004-.004-.001-.001a.75.75 0 0 1-.154-.838L2.178 3.5H1.75a.75.75 0 0 1 0-1.5h2.234c.044 0 .086-.011.124-.033l1.29-.736A1.75 1.75 0 0 1 6.218.5H7.25v-.25a.75.75 0 0 1 1.5 0ZM3 8.957l-.979-2.178H3.98L3 8.957Zm10 0-.979-2.178h1.958L13 8.957Z"/>
+                </svg>
+                MIT License
+            </span>
+        </div>
+
+        <!-- Questions -->
+        <section>
+            <h2><span class="icon">&#10067;</span> Perguntas (Entonação Ascendente)</h2>
+            <p class="section-desc">O CTTS aplica entonação ascendente automática em frases interrogativas, característica fundamental do português brasileiro.</p>
+            <div class="samples-grid">
+                <div class="sample">
+                    <div class="sample-text">"Como vai?"</div>
+                    <audio controls preload="metadata"><source src="audio/01_question_simple.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Como você se chama?"</div>
+                    <audio controls preload="metadata"><source src="audio/02_question_name.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Onde você mora?"</div>
+                    <audio controls preload="metadata"><source src="audio/03_question_where.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Você fala português?"</div>
+                    <audio controls preload="metadata"><source src="audio/09_question_yes_no.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Você pode me ajudar a encontrar o caminho?"</div>
+                    <div class="sample-info">Frase longa com entonação progressiva</div>
+                    <audio controls preload="metadata"><source src="audio/08_question_long.wav" type="audio/wav"></audio>
+                </div>
+            </div>
+        </section>
+
+        <!-- Exclamations -->
+        <section>
+            <h2><span class="icon">&#10071;</span> Exclamações (Energia e Ênfase)</h2>
+            <p class="section-desc">Frases exclamativas recebem maior energia e pitch elevado para expressar emoção.</p>
+            <div class="samples-grid">
+                <div class="sample">
+                    <div class="sample-text">"Que legal!"</div>
+                    <audio controls preload="metadata"><source src="audio/11_exclaim_wow.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Isso é incrível!"</div>
+                    <audio controls preload="metadata"><source src="audio/13_exclaim_amazing.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Parabéns!"</div>
+                    <audio controls preload="metadata"><source src="audio/18_exclaim_congrats.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Eu não acredito que isso aconteceu!"</div>
+                    <div class="sample-info">Exclamação longa com ênfase sustentada</div>
+                    <audio controls preload="metadata"><source src="audio/20_exclaim_long.wav" type="audio/wav"></audio>
+                </div>
+            </div>
+        </section>
+
+        <!-- Brazilian Portuguese Phonology -->
+        <section>
+            <h2><span class="icon">&#127463;&#127479;</span> Fonologia do Português Brasileiro</h2>
+            <p class="section-desc">Regras fonológicas específicas do português brasileiro aplicadas automaticamente.</p>
+
+            <h3 style="color: var(--accent); margin: 1.5rem 0 1rem; font-size: 1.1rem;">R Inicial (Som de RR)</h3>
+            <div class="samples-grid">
+                <div class="sample">
+                    <div class="sample-text">"A rosa é vermelha"</div>
+                    <div class="sample-info">"rosa" → pronúncia com RR forte</div>
+                    <audio controls preload="metadata"><source src="audio/71_r_rosa.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"O rato roeu a roupa do rei de Roma"</div>
+                    <div class="sample-info">Trava-língua clássico com múltiplos R</div>
+                    <audio controls preload="metadata"><source src="audio/80_r_sentence.wav" type="audio/wav"></audio>
+                </div>
+            </div>
+
+            <h3 style="color: var(--accent); margin: 1.5rem 0 1rem; font-size: 1.1rem;">S Intervocálico (Som de Z)</h3>
+            <div class="samples-grid">
+                <div class="sample">
+                    <div class="sample-text">"Minha casa é grande"</div>
+                    <div class="sample-info">"casa" → pronúncia "caza"</div>
+                    <audio controls preload="metadata"><source src="audio/81_s_casa.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"O Brasil é lindo"</div>
+                    <div class="sample-info">"Brasil" → pronúncia "Brazil"</div>
+                    <audio controls preload="metadata"><source src="audio/88_s_brasil.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Eu amo música"</div>
+                    <div class="sample-info">"música" → pronúncia "muzica"</div>
+                    <audio controls preload="metadata"><source src="audio/86_s_música.wav" type="audio/wav"></audio>
+                </div>
+            </div>
+
+            <h3 style="color: var(--accent); margin: 1.5rem 0 1rem; font-size: 1.1rem;">T Final (Som de TI)</h3>
+            <div class="samples-grid">
+                <div class="sample">
+                    <div class="sample-text">"A internet é rápida"</div>
+                    <div class="sample-info">"internet" → pronúncia "interneti"</div>
+                    <audio controls preload="metadata"><source src="audio/91_t_internet.wav" type="audio/wav"></audio>
+                </div>
+            </div>
+        </section>
+
+        <!-- Numbers -->
+        <section>
+            <h2><span class="icon">&#128290;</span> Expansão de Números</h2>
+            <p class="section-desc">Números são automaticamente convertidos para texto em português brasileiro.</p>
+            <div class="samples-grid">
+                <div class="sample">
+                    <div class="sample-text">"Ela tem 15 anos"</div>
+                    <div class="sample-info">15 → "quinze"</div>
+                    <audio controls preload="metadata"><source src="audio/42_num_teens.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Custa 100 reais"</div>
+                    <div class="sample-info">100 → "cem"</div>
+                    <audio controls preload="metadata"><source src="audio/44_num_hundred.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"São 2500 pessoas"</div>
+                    <div class="sample-info">2500 → "dois mil e quinhentos"</div>
+                    <audio controls preload="metadata"><source src="audio/47_num_thousands.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"A cidade tem 12000000 habitantes"</div>
+                    <div class="sample-info">12000000 → "doze milhões"</div>
+                    <audio controls preload="metadata"><source src="audio/49_num_big.wav" type="audio/wav"></audio>
+                </div>
+            </div>
+        </section>
+
+        <!-- Abbreviations -->
+        <section>
+            <h2><span class="icon">&#128209;</span> Abreviações</h2>
+            <p class="section-desc">Abreviações comuns são expandidas automaticamente.</p>
+            <div class="samples-grid">
+                <div class="sample">
+                    <div class="sample-text">"Dr. Silva é médico"</div>
+                    <div class="sample-info">Dr. → "doutor"</div>
+                    <audio controls preload="metadata"><source src="audio/51_abbrev_dr.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"São 5 km de distância"</div>
+                    <div class="sample-info">km → "quilômetros"</div>
+                    <audio controls preload="metadata"><source src="audio/54_abbrev_units.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Pesa 10 kg"</div>
+                    <div class="sample-info">kg → "quilogramas"</div>
+                    <audio controls preload="metadata"><source src="audio/55_abbrev_weight.wav" type="audio/wav"></audio>
+                </div>
+            </div>
+        </section>
+
+        <!-- Punctuation and Prosody -->
+        <section>
+            <h2><span class="icon">&#128172;</span> Pausas e Prosódia</h2>
+            <p class="section-desc">Pausas naturais baseadas em pontuação e declínio melódico em frases longas.</p>
+            <div class="samples-grid">
+                <div class="sample">
+                    <div class="sample-text">"Eu quero café, pão, e manteiga"</div>
+                    <div class="sample-info">Pausas breves nas vírgulas</div>
+                    <audio controls preload="metadata"><source src="audio/21_comma_list.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Bom dia. Como vai. Tudo bem."</div>
+                    <div class="sample-info">Pausas completas nos pontos</div>
+                    <audio controls preload="metadata"><source src="audio/32_period_three.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Você viu isso? Que incrível!"</div>
+                    <div class="sample-info">Combinação pergunta + exclamação</div>
+                    <audio controls preload="metadata"><source src="audio/36_mixed_question_exclaim.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"O Brasil é um país muito grande com muitas cidades bonitas e pessoas simpáticas que adoram futebol e música"</div>
+                    <div class="sample-info">Declínio natural de pitch em frase longa</div>
+                    <audio controls preload="metadata"><source src="audio/96_decl_very_long.wav" type="audio/wav"></audio>
+                </div>
+            </div>
+        </section>
+
+        <!-- Speed Control -->
+        <section>
+            <h2><span class="icon">&#9202;</span> Controle de Velocidade (WSOLA)</h2>
+            <p class="section-desc">Ajuste de velocidade de 0.5x a 2.0x sem distorção de pitch usando algoritmo PSOLA.</p>
+            <p class="section-desc" style="margin-bottom: 0.5rem;"><strong>Frase:</strong> "O Brasil é um país muito bonito"</p>
+            <div class="speed-grid">
+                <div class="speed-sample">
+                    <div class="speed-label">0.5x</div>
+                    <audio controls preload="metadata"><source src="audio/97_speed_0.5x.wav" type="audio/wav"></audio>
+                </div>
+                <div class="speed-sample">
+                    <div class="speed-label">0.7x</div>
+                    <audio controls preload="metadata"><source src="audio/98_speed_0.7x.wav" type="audio/wav"></audio>
+                </div>
+                <div class="speed-sample">
+                    <div class="speed-label">1.0x</div>
+                    <audio controls preload="metadata"><source src="audio/100_speed_1.0x.wav" type="audio/wav"></audio>
+                </div>
+                <div class="speed-sample">
+                    <div class="speed-label">1.5x</div>
+                    <audio controls preload="metadata"><source src="audio/102_speed_1.5x.wav" type="audio/wav"></audio>
+                </div>
+                <div class="speed-sample">
+                    <div class="speed-label">2.0x</div>
+                    <audio controls preload="metadata"><source src="audio/104_speed_2.0x.wav" type="audio/wav"></audio>
+                </div>
+            </div>
+        </section>
+
+        <!-- Dialogues -->
+        <section>
+            <h2><span class="icon">&#128483;</span> Diálogos Completos</h2>
+            <p class="section-desc">Exemplos de conversações naturais com múltiplas pontuações.</p>
+            <div class="samples-grid">
+                <div class="sample">
+                    <div class="sample-text">"Olá, tudo bem? Tudo ótimo, e você? Também estou bem, obrigado!"</div>
+                    <div class="sample-info">Cumprimento típico brasileiro</div>
+                    <audio controls preload="metadata"><source src="audio/116_dialogue_greeting.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Quanto custa isso? São 50 reais. Está caro! Posso fazer por 40."</div>
+                    <div class="sample-info">Negociação de preço</div>
+                    <audio controls preload="metadata"><source src="audio/117_dialogue_shopping.wav" type="audio/wav"></audio>
+                </div>
+                <div class="sample">
+                    <div class="sample-text">"Onde fica o banco? Vira à direita, depois segue em frente. Obrigado!"</div>
+                    <div class="sample-info">Pedindo direções</div>
+                    <audio controls preload="metadata"><source src="audio/118_dialogue_directions.wav" type="audio/wav"></audio>
+                </div>
+            </div>
+        </section>
+
+        <!-- Technical Details -->
+        <section>
+            <h2><span class="icon">&#9881;</span> Detalhes Técnicos</h2>
+            <div class="tech-details">
+                <div class="tech-card">
+                    <h3>Síntese Concatenativa</h3>
+                    <p>Unidades de fala pré-gravadas (sílabas e letras) são concatenadas com crossfade suave usando função raised-cosine.</p>
+                </div>
+                <div class="tech-card">
+                    <h3>Processamento de Áudio</h3>
+                    <p>16-bit PCM, 22050 Hz. Remoção de DC offset, normalização de energia, e suavização de pitch nas junções.</p>
+                </div>
+                <div class="tech-card">
+                    <h3>Regras Fonológicas</h3>
+                    <p>Implementação de regras específicas do português brasileiro via arquivos CSV configuráveis.</p>
+                </div>
+                <div class="tech-card">
+                    <h3>Zero Dependências</h3>
+                    <p>Implementação 100% em C padrão. Requer apenas GCC e biblioteca padrão C para compilar.</p>
+                </div>
+            </div>
+        </section>
+
+        <footer>
+            <p><strong>CTTS</strong> - Sintetizador de Voz Concatenativo</p>
+            <p>Desenvolvido com assistência do Claude (Anthropic)</p>
+            <p style="margin-top: 1rem;">
+                <span class="license-badge">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M8.75.75V2h.985c.304 0 .603.08.867.231l1.29.736c.038.022.08.033.124.033h2.234a.75.75 0 0 1 0 1.5h-.427l2.111 4.692a.75.75 0 0 1-.154.838l-.53-.53.529.531-.001.002-.002.002-.006.006-.015.014-.045.04a3.514 3.514 0 0 1-.686.45A4.492 4.492 0 0 1 13 10c-.88 0-1.556-.22-2.023-.454a3.515 3.515 0 0 1-.686-.45l-.045-.04-.015-.014-.006-.006-.004-.004-.001-.001a.75.75 0 0 1-.154-.838L12.178 3.5h-.936a.75.75 0 0 1-.35-.087l-1.29-.736a.25.25 0 0 0-.118-.032H8.75V13h2.5a.75.75 0 0 1 0 1.5h-6.5a.75.75 0 0 1 0-1.5h2.5V2.75H6.218a.25.25 0 0 0-.118.032l-1.29.736a.75.75 0 0 1-.35.087h-.936l2.111 4.692a.75.75 0 0 1-.154.838l-.53-.53.529.531-.001.002-.002.002-.006.006-.015.014-.045.04a3.517 3.517 0 0 1-.686.45A4.492 4.492 0 0 1 3 10c-.88 0-1.556-.22-2.023-.454a3.512 3.512 0 0 1-.686-.45l-.045-.04-.015-.014-.006-.006-.004-.004-.001-.001a.75.75 0 0 1-.154-.838L2.178 3.5H1.75a.75.75 0 0 1 0-1.5h2.234c.044 0 .086-.011.124-.033l1.29-.736A1.75 1.75 0 0 1 6.218.5H7.25v-.25a.75.75 0 0 1 1.5 0ZM3 8.957l-.979-2.178H3.98L3 8.957Zm10 0-.979-2.178h1.958L13 8.957Z"/>
+                    </svg>
+                    MIT License
+                </span>
+            </p>
+            <a href="https://github.com/jonathandasilvasantos/2026-simple-c-tts" class="github-btn">
+                <svg height="20" width="20" viewBox="0 0 16 16">
+                    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+                </svg>
+                Ver no GitHub
+            </a>
+        </footer>
+    </div>
+</body>
+</html>

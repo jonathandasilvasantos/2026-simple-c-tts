@@ -279,7 +279,9 @@ void ctts_free_samples(int16_t* samples);
 
 ## License
 
-Copyright (c) 2024-2026
+MIT License - See [LICENSE](LICENSE) file for details.
+
+Copyright (c) 2024-2026 Jonathan da Silva Santos
 
 ## Author
 

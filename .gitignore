@@ -1,6 +1,6 @@
 # Generated database
-voice.db
 *.db
+voice.db
 
 # Sample outputs
 /samples/
@@ -22,6 +22,10 @@ generate_samples.sh
 *.o
 ctts
 *.wav
+
+# Allow docs folder for GitHub Pages
+!docs/
+!docs/**
 
 # OS files
 .DS_Store
