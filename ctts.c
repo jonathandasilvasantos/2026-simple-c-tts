@@ -1206,6 +1206,7 @@ void ctts_config_defaults(CTTSConfig* config) {
     config->default_speed = CTTS_DEFAULT_SPEED;
     config->min_speed = CTTS_MIN_SPEED;
     config->max_speed = CTTS_MAX_SPEED;
+    config->max_pitch_change = 0.10f;  /* ±10% maximum pitch change */
     config->print_units = 0;
     config->print_timing = 0;
 }
@@ -1281,6 +1282,8 @@ static void parse_config_line(CTTSConfig* config, const char* line) {
         config->min_speed = strtof(value, NULL);
     } else if (strcmp(k, "max_speed") == 0) {
         config->max_speed = strtof(value, NULL);
+    } else if (strcmp(k, "max_pitch_change") == 0) {
+        config->max_pitch_change = strtof(value, NULL);
     } else if (strcmp(k, "print_units") == 0) {
         config->print_units = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0);
     } else if (strcmp(k, "print_timing") == 0) {
@@ -2579,6 +2582,18 @@ static PhraseType get_pre_punctuation_phrase_type(const char* text, size_t text_
     return PHRASE_DECLARATIVE;
 }
 
+/*
+ * Clamp pitch factor to configured maximum change limit.
+ * max_change of 0.10 means pitch can range from 0.90 to 1.10 (±10%)
+ */
+static inline float clamp_pitch(float pitch, float max_change) {
+    float min_pitch = 1.0f - max_change;
+    float max_pitch = 1.0f + max_change;
+    if (pitch < min_pitch) return min_pitch;
+    if (pitch > max_pitch) return max_pitch;
+    return pitch;
+}
+
 typedef struct {
     PhraseType type;
     float pitch_start;      /* Starting pitch factor */
@@ -2588,6 +2603,36 @@ typedef struct {
     float energy_factor;    /* Overall energy adjustment */
     float final_lengthening; /* Duration factor for final syllable */
 } PhraseIntonation;
+
+/*
+ * Scale an intonation pattern to fit within the max_pitch_change limit.
+ * This preserves the relative shape of the contour while limiting extremes.
+ */
+static void scale_intonation_to_limit(PhraseIntonation* inton, float max_change) {
+    if (max_change <= 0.0f) return;  /* No limit */
+
+    /* Find the most extreme deviation from 1.0 */
+    float max_dev = 0.0f;
+    float devs[3] = {
+        fabsf(inton->pitch_start - 1.0f),
+        fabsf(inton->pitch_end - 1.0f),
+        fabsf(inton->pitch_peak - 1.0f)
+    };
+    for (int i = 0; i < 3; i++) {
+        if (devs[i] > max_dev) max_dev = devs[i];
+    }
+
+    /* If within limits, no scaling needed */
+    if (max_dev <= max_change) return;
+
+    /* Scale factor to bring max deviation within limit */
+    float scale = max_change / max_dev;
+
+    /* Scale all pitch values toward 1.0 */
+    inton->pitch_start = 1.0f + (inton->pitch_start - 1.0f) * scale;
+    inton->pitch_end = 1.0f + (inton->pitch_end - 1.0f) * scale;
+    inton->pitch_peak = 1.0f + (inton->pitch_peak - 1.0f) * scale;
+}
 
 /* Get intonation pattern for phrase type */
 static PhraseIntonation get_phrase_intonation(PhraseType type) {
@@ -2675,14 +2720,23 @@ static PhraseIntonation get_phrase_intonation(PhraseType type) {
     return inton;
 }
 
+/* Get intonation pattern with pitch values scaled to max_pitch_change limit */
+static PhraseIntonation get_phrase_intonation_limited(PhraseType type, float max_pitch_change) {
+    PhraseIntonation inton = get_phrase_intonation(type);
+    scale_intonation_to_limit(&inton, max_pitch_change);
+    return inton;
+}
+
 /*
  * Apply phrase intonation contour to samples
  * Uses smooth interpolation for natural pitch movement
  * Handles special patterns for questions (circumflex) and exclamations
+ * All pitch values are clamped to max_pitch_change limit.
  */
 static void apply_phrase_intonation(int16_t* samples, size_t count,
                                      PhraseIntonation* inton,
-                                     int word_index, int total_words) {
+                                     int word_index, int total_words,
+                                     float max_pitch_change) {
     if (count < 100 || total_words == 0) return;
 
     /* Calculate position in phrase (0.0 = first word, 1.0 = last word) */
@@ -2705,9 +2759,12 @@ static void apply_phrase_intonation(int16_t* samples, size_t count,
         pitch_factor = inton->pitch_peak + (inton->pitch_end - inton->pitch_peak) * t;
     }
 
+    /* Clamp the interpolated pitch factor */
+    pitch_factor = clamp_pitch(pitch_factor, max_pitch_change);
+
     /* Calculate word-internal pitch contour - initialize with defaults */
-    float word_start = pitch_factor * 0.98f;
-    float word_end = pitch_factor * 1.02f;
+    float word_start = clamp_pitch(pitch_factor * 0.98f, max_pitch_change);
+    float word_end = clamp_pitch(pitch_factor * 1.02f, max_pitch_change);
 
     /*
      * Special handling for questions (circumflex pattern on final words):
@@ -2717,23 +2774,24 @@ static void apply_phrase_intonation(int16_t* samples, size_t count,
     if (inton->type == PHRASE_INTERROGATIVE && (is_final_word || is_penultimate)) {
         if (is_final_word) {
             /* Final word: strong rise to peak, then fall */
-            word_start = pitch_factor * 0.95f;   /* Start low */
-            word_end = inton->pitch_end;         /* End at phrase-final pitch */
+            word_start = clamp_pitch(pitch_factor * 0.95f, max_pitch_change);
+            word_end = clamp_pitch(inton->pitch_end, max_pitch_change);
             /* Apply circumflex: rise in first 60%, fall in last 40% */
             size_t rise_samples = (size_t)(count * 0.6f);
             if (rise_samples > 100 && count - rise_samples > 100) {
+                float peak = clamp_pitch(inton->pitch_peak, max_pitch_change);
                 /* Rising portion */
                 apply_smooth_pitch_contour(samples, rise_samples,
-                                           word_start, inton->pitch_peak);
+                                           word_start, peak);
                 /* Falling portion */
                 apply_smooth_pitch_contour(samples + rise_samples, count - rise_samples,
-                                           inton->pitch_peak, word_end);
+                                           peak, word_end);
                 goto apply_energy;  /* Skip normal contour application */
             }
         } else {
             /* Penultimate word: gradual rise leading to final word */
-            word_start = pitch_factor * 0.98f;
-            word_end = pitch_factor * 1.05f;
+            word_start = clamp_pitch(pitch_factor * 0.98f, max_pitch_change);
+            word_end = clamp_pitch(pitch_factor * 1.05f, max_pitch_change);
         }
     }
     /*
@@ -2743,16 +2801,16 @@ static void apply_phrase_intonation(int16_t* samples, size_t count,
     else if (inton->type == PHRASE_EXCLAMATORY) {
         if (word_index == 0) {
             /* First word: high attack, slight fall */
-            word_start = inton->pitch_peak;      /* Start at peak */
-            word_end = pitch_factor;             /* Fall to phrase contour */
+            word_start = clamp_pitch(inton->pitch_peak, max_pitch_change);
+            word_end = clamp_pitch(pitch_factor, max_pitch_change);
         } else if (is_final_word) {
             /* Final word: continue falling, strong final lowering */
-            word_start = pitch_factor;
-            word_end = inton->pitch_end;
+            word_start = clamp_pitch(pitch_factor, max_pitch_change);
+            word_end = clamp_pitch(inton->pitch_end, max_pitch_change);
         } else {
             /* Middle words: gradual decline */
-            word_start = pitch_factor * 1.02f;
-            word_end = pitch_factor * 0.98f;
+            word_start = clamp_pitch(pitch_factor * 1.02f, max_pitch_change);
+            word_end = clamp_pitch(pitch_factor * 0.98f, max_pitch_change);
         }
     }
     /*
@@ -2760,20 +2818,20 @@ static void apply_phrase_intonation(int16_t* samples, size_t count,
      */
     else if (inton->type == PHRASE_CONTINUATION && is_final_word) {
         /* Clear rise on pre-boundary word */
-        word_start = pitch_factor * 0.96f;
-        word_end = inton->pitch_end;  /* Rise to continuation pitch */
+        word_start = clamp_pitch(pitch_factor * 0.96f, max_pitch_change);
+        word_end = clamp_pitch(inton->pitch_end, max_pitch_change);
     }
     /*
      * Default word-internal contour
      */
     else {
         /* Slight rise-fall within word for naturalness */
-        word_start = pitch_factor * 0.98f;
-        word_end = pitch_factor * 1.02f;
+        word_start = clamp_pitch(pitch_factor * 0.98f, max_pitch_change);
+        word_end = clamp_pitch(pitch_factor * 1.02f, max_pitch_change);
 
         /* Final word follows phrase contour to end pitch */
         if (is_final_word) {
-            word_end = inton->pitch_end;
+            word_end = clamp_pitch(inton->pitch_end, max_pitch_change);
         }
     }
 
@@ -2821,8 +2879,8 @@ typedef struct {
     PhraseIntonation intonation;
 } ProsodyContext;
 
-/* Analyze text for prosody cues */
-static void analyze_prosody(const char* text, ProsodyContext* ctx) {
+/* Analyze text for prosody cues with pitch limit */
+static void analyze_prosody(const char* text, ProsodyContext* ctx, float max_pitch_change) {
     ctx->is_question = 0;
     ctx->is_exclamation = 0;
     ctx->word_count = 0;
@@ -2832,7 +2890,7 @@ static void analyze_prosody(const char* text, ProsodyContext* ctx) {
 
     size_t len = strlen(text);
     if (len == 0) {
-        ctx->intonation = get_phrase_intonation(ctx->phrase_type);
+        ctx->intonation = get_phrase_intonation_limited(ctx->phrase_type, max_pitch_change);
         return;
     }
 
@@ -2853,12 +2911,12 @@ static void analyze_prosody(const char* text, ProsodyContext* ctx) {
         if (c == '?') {
             ctx->is_question = 1;
             ctx->phrase_type = PHRASE_INTERROGATIVE;
-            ctx->pitch_modifier = 1.05f;  /* Slightly higher overall pitch */
+            ctx->pitch_modifier = clamp_pitch(1.05f, max_pitch_change);
             break;
         } else if (c == '!') {
             ctx->is_exclamation = 1;
             ctx->phrase_type = PHRASE_EXCLAMATORY;
-            ctx->pitch_modifier = 1.08f;  /* Higher pitch, more energy */
+            ctx->pitch_modifier = clamp_pitch(1.08f, max_pitch_change);
             break;
         } else if (c == ',' || c == ';') {
             ctx->phrase_type = PHRASE_CONTINUATION;
@@ -2870,8 +2928,8 @@ static void analyze_prosody(const char* text, ProsodyContext* ctx) {
         }
     }
 
-    /* Get the intonation pattern for this phrase type */
-    ctx->intonation = get_phrase_intonation(ctx->phrase_type);
+    /* Get the intonation pattern for this phrase type (scaled to pitch limit) */
+    ctx->intonation = get_phrase_intonation_limited(ctx->phrase_type, max_pitch_change);
 }
 
 /* Apply question intonation (rising pitch at end) */
@@ -3577,9 +3635,9 @@ int ctts_synthesize(CTTS* engine, const char* text,
     /* Load duration rules (if not already loaded) */
     load_duration_rules("duration_rules.csv");
 
-    /* Analyze prosody context from original text */
+    /* Analyze prosody context from original text (with pitch limit from config) */
     ProsodyContext prosody;
-    analyze_prosody(text, &prosody);
+    analyze_prosody(text, &prosody, config->max_pitch_change);
 
     /* Step 1: Expand numbers to words */
     char* numbers_expanded = expand_numbers(text);
@@ -3650,7 +3708,8 @@ int ctts_synthesize(CTTS* engine, const char* text,
                 apply_phrase_intonation(buf.data + word_start_sample,
                                         buf.count - word_start_sample,
                                         &prosody.intonation,
-                                        current_word_index, prosody.word_count);
+                                        current_word_index, prosody.word_count,
+                                        config->max_pitch_change);
             }
 
             /* Apply fade-out before silence if we have audio */
@@ -3834,7 +3893,8 @@ int ctts_synthesize(CTTS* engine, const char* text,
         apply_phrase_intonation(buf.data + word_start_sample,
                                 buf.count - word_start_sample,
                                 &prosody.intonation,
-                                current_word_index, prosody.word_count);
+                                current_word_index, prosody.word_count,
+                                config->max_pitch_change);
     }
 
     free(normalized);

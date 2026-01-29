@@ -81,6 +81,14 @@ synthesis:
   # Maximum speed allowed
   max_speed: 2.0
 
+# Prosody settings
+prosody:
+  # Maximum pitch change allowed (0.10 = ±10%)
+  # All prosody functions (questions, exclamations, declination) will be
+  # clamped to this range. Set to 0.10 for subtle, natural-sounding prosody.
+  # Range: 0.05 (very subtle) to 0.30 (dramatic)
+  max_pitch_change: 0.10
+
 # Debug settings
 debug:
   # Print matched units during synthesis

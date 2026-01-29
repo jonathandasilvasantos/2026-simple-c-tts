@@ -68,6 +68,9 @@ typedef struct {
     float min_speed;
     float max_speed;
 
+    /* Prosody limits */
+    float max_pitch_change;     /* Maximum pitch change (0.10 = ±10%) */
+
     /* Debug */
     int print_units;
     int print_timing;
