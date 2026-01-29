@@ -46,6 +46,61 @@ static int norm_rules_loaded = 0;
 #define OVERLAP_SAMPLES(ms) ((int)((ms) * CTTS_SAMPLE_RATE / 1000.0f))
 
 /* ============================================================================
+ * Pre-computed Lookup Tables for Fast Audio Processing
+ * ============================================================================ */
+
+#define FADE_LUT_SIZE 1024
+
+/* Pre-computed cosine fade curves for crossfade operations */
+static float fade_out_lut[FADE_LUT_SIZE];  /* 1 -> 0 (cosine) */
+static float fade_in_lut[FADE_LUT_SIZE];   /* 0 -> 1 (cosine) */
+static float sine_fade_lut[FADE_LUT_SIZE]; /* 0 -> 1 (sine quarter) */
+static int fade_lut_initialized = 0;
+
+static void init_fade_luts(void) {
+    if (fade_lut_initialized) return;
+
+    for (int i = 0; i < FADE_LUT_SIZE; i++) {
+        float t = (float)i / (float)(FADE_LUT_SIZE - 1);
+        /* Raised cosine: smooth crossfade curve */
+        fade_out_lut[i] = 0.5f * (1.0f + cosf(PI * t));  /* 1 -> 0 */
+        fade_in_lut[i] = 0.5f * (1.0f - cosf(PI * t));   /* 0 -> 1 */
+        /* Sine quarter wave: smooth fade in/out */
+        sine_fade_lut[i] = sinf(t * PI * 0.5f);          /* 0 -> 1 */
+    }
+
+    fade_lut_initialized = 1;
+}
+
+/* Fast lookup with linear interpolation */
+static inline float fast_fade_out(float t) {
+    float idx_f = t * (FADE_LUT_SIZE - 1);
+    int idx = (int)idx_f;
+    if (idx >= FADE_LUT_SIZE - 1) return fade_out_lut[FADE_LUT_SIZE - 1];
+    if (idx < 0) return fade_out_lut[0];
+    float frac = idx_f - idx;
+    return fade_out_lut[idx] * (1.0f - frac) + fade_out_lut[idx + 1] * frac;
+}
+
+static inline float fast_fade_in(float t) {
+    float idx_f = t * (FADE_LUT_SIZE - 1);
+    int idx = (int)idx_f;
+    if (idx >= FADE_LUT_SIZE - 1) return fade_in_lut[FADE_LUT_SIZE - 1];
+    if (idx < 0) return fade_in_lut[0];
+    float frac = idx_f - idx;
+    return fade_in_lut[idx] * (1.0f - frac) + fade_in_lut[idx + 1] * frac;
+}
+
+static inline float fast_sine_fade(float t) {
+    float idx_f = t * (FADE_LUT_SIZE - 1);
+    int idx = (int)idx_f;
+    if (idx >= FADE_LUT_SIZE - 1) return sine_fade_lut[FADE_LUT_SIZE - 1];
+    if (idx < 0) return sine_fade_lut[0];
+    float frac = idx_f - idx;
+    return sine_fade_lut[idx] * (1.0f - frac) + sine_fade_lut[idx + 1] * frac;
+}
+
+/* ============================================================================
  * Internal Structures
  * ============================================================================ */
 
@@ -2128,13 +2183,32 @@ static int apply_td_psola_pitch(const int16_t* input, size_t input_count,
  * start_factor: pitch factor at beginning
  * end_factor: pitch factor at end
  * Uses cubic interpolation for smooth transition
+ *
+ * OPTIMIZED: Pre-compute Hanning window, reduce allocations for small changes
  */
+
+/* Pre-computed Hanning window for 256-sample frame */
+#define PITCH_FRAME_SIZE 256
+static float hanning_window[PITCH_FRAME_SIZE];
+static int hanning_initialized = 0;
+
+static void init_hanning_window(void) {
+    if (hanning_initialized) return;
+    for (int i = 0; i < PITCH_FRAME_SIZE; i++) {
+        hanning_window[i] = 0.5f * (1.0f - cosf(2.0f * PI * i / PITCH_FRAME_SIZE));
+    }
+    hanning_initialized = 1;
+}
+
 static void apply_smooth_pitch_contour(int16_t* samples, size_t count,
                                         float start_factor, float end_factor) {
     if (count < 100 || fabsf(start_factor - end_factor) < 0.01f) return;
 
+    /* Initialize Hanning window if needed */
+    init_hanning_window();
+
     /* Process in small overlapping frames for smoothness */
-    size_t frame_size = 256;
+    size_t frame_size = PITCH_FRAME_SIZE;
     size_t hop = frame_size / 2;
 
     int16_t* temp = malloc(count * sizeof(int16_t));
@@ -2149,16 +2223,18 @@ static void apply_smooth_pitch_contour(int16_t* samples, size_t count,
 
     memset(samples, 0, count * sizeof(int16_t));
 
+    float inv_count = 1.0f / (float)(count - frame_size);
+
     for (size_t pos = 0; pos + frame_size <= count; pos += hop) {
         /* Calculate pitch factor at this position using smooth interpolation */
-        float t = (float)pos / (count - frame_size);
+        float t = (float)pos * inv_count;
         /* Cubic smoothstep for very smooth transition */
         float smooth_t = t * t * (3.0f - 2.0f * t);
         float pitch_factor = start_factor + (end_factor - start_factor) * smooth_t;
 
-        /* Apply pitch modification to this frame */
+        /* Apply pitch modification to this frame using pre-computed window */
         for (size_t i = 0; i < frame_size; i++) {
-            float window = 0.5f * (1.0f - cosf(2.0f * PI * i / frame_size));
+            float window = hanning_window[i];
 
             /* Resample */
             float src_idx = i * pitch_factor;
@@ -2877,29 +2953,29 @@ static int buffer_grow(SampleBuffer* buf, size_t needed) {
     return CTTS_OK;
 }
 
-/* Apply fade-in to samples (in-place) */
+/* Apply fade-in to samples (in-place) - uses pre-computed LUT */
 static void apply_fade_in(int16_t* samples, size_t count, size_t fade_samples) {
     if (fade_samples == 0 || count == 0) return;
     if (fade_samples > count) fade_samples = count;
 
+    float inv_fade = 1.0f / (float)fade_samples;
     for (size_t i = 0; i < fade_samples; i++) {
-        float gain = (float)i / (float)fade_samples;
-        /* Use smooth curve (sine-based) instead of linear */
-        gain = sinf(gain * PI * 0.5f);
+        float t = (float)i * inv_fade;
+        float gain = fast_sine_fade(t);
         samples[i] = (int16_t)(samples[i] * gain);
     }
 }
 
-/* Apply fade-out to samples (in-place) */
+/* Apply fade-out to samples (in-place) - uses pre-computed LUT */
 static void apply_fade_out(int16_t* samples, size_t count, size_t fade_samples) {
     if (fade_samples == 0 || count == 0) return;
     if (fade_samples > count) fade_samples = count;
 
     size_t start = count - fade_samples;
+    float inv_fade = 1.0f / (float)fade_samples;
     for (size_t i = 0; i < fade_samples; i++) {
-        float gain = (float)(fade_samples - i) / (float)fade_samples;
-        /* Use smooth curve (sine-based) instead of linear */
-        gain = sinf(gain * PI * 0.5f);
+        float t = (float)(fade_samples - i) * inv_fade;
+        float gain = fast_sine_fade(t);
         samples[start + i] = (int16_t)(samples[start + i] * gain);
     }
 }
@@ -3139,6 +3215,8 @@ static int pt_syllable_score(const char* text, size_t byte_len, size_t char_coun
  * Does NOT truncate audio - keeps full samples with fade in/out.
  * crossfade_ms parameter allows caller to specify crossfade duration.
  * after_word_boundary: if true, apply fade-in instead of crossfade (first unit of word)
+ *
+ * OPTIMIZED: Uses pre-computed LUT for crossfade, avoids malloc when possible.
  */
 static int buffer_append_crossfade(SampleBuffer* buf, const int16_t* samples,
                                     size_t count, float crossfade_ms,
@@ -3149,53 +3227,60 @@ static int buffer_append_crossfade(SampleBuffer* buf, const int16_t* samples,
     size_t crossfade_samples = (size_t)(crossfade_ms * CTTS_SAMPLE_RATE / 1000.0f);
     size_t fade_in_samples = (size_t)(config->fade_in_ms * CTTS_SAMPLE_RATE / 1000.0f);
 
-    /* Make a copy to process */
-    int16_t* copy = malloc(count * sizeof(int16_t));
-    if (!copy) return CTTS_ERR_OUT_OF_MEMORY;
-    memcpy(copy, samples, count * sizeof(int16_t));
-
-    /* Remove DC offset if configured */
-    if (config->remove_dc_offset) {
-        remove_dc_offset(copy, count);
-    }
-
     int err = buffer_grow(buf, count + crossfade_samples);
-    if (err != CTTS_OK) {
-        free(copy);
-        return err;
+    if (err != CTTS_OK) return err;
+
+    /* Only allocate copy if we need to modify the input (DC offset removal or fade-in) */
+    int16_t* copy = NULL;
+    const int16_t* src = samples;
+
+    if (config->remove_dc_offset || (buf->count == 0 || after_word_boundary)) {
+        copy = malloc(count * sizeof(int16_t));
+        if (!copy) return CTTS_ERR_OUT_OF_MEMORY;
+        memcpy(copy, samples, count * sizeof(int16_t));
+        src = copy;
+
+        if (config->remove_dc_offset) {
+            remove_dc_offset(copy, count);
+        }
     }
 
     if (buf->count == 0 || after_word_boundary) {
         /* First segment or first unit after word boundary - apply fade-in at start */
-        apply_fade_in(copy, count, fade_in_samples);
-        memcpy(buf->data + buf->count, copy, count * sizeof(int16_t));
+        if (copy) {
+            apply_fade_in(copy, count, fade_in_samples);
+        }
+        memcpy(buf->data + buf->count, src, count * sizeof(int16_t));
         buf->count += count;
     } else if (crossfade_samples == 0) {
         /* No crossfade - just append */
-        memcpy(buf->data + buf->count, copy, count * sizeof(int16_t));
+        memcpy(buf->data + buf->count, src, count * sizeof(int16_t));
         buf->count += count;
     } else {
-        /* Crossfade with previous audio (within a word) */
+        /* Crossfade with previous audio (within a word) - use pre-computed LUT */
         size_t actual_crossfade = crossfade_samples;
         if (actual_crossfade > buf->count) actual_crossfade = buf->count;
         if (actual_crossfade > count) actual_crossfade = count;
 
-        /* Crossfade region */
+        /* Crossfade region using pre-computed lookup tables */
         if (actual_crossfade > 0) {
             size_t fade_start = buf->count - actual_crossfade;
+            float inv_crossfade = 1.0f / (float)actual_crossfade;
+
             for (size_t i = 0; i < actual_crossfade; i++) {
-                /* Smooth crossfade using raised cosine */
-                float t = (float)i / (float)actual_crossfade;
-                float prev_gain = 0.5f * (1.0f + cosf(PI * t));  /* 1 -> 0 */
-                float next_gain = 0.5f * (1.0f - cosf(PI * t));  /* 0 -> 1 */
+                float t = (float)i * inv_crossfade;
+                /* Use pre-computed LUT for crossfade gains */
+                float prev_gain = fast_fade_out(t);
+                float next_gain = fast_fade_in(t);
 
                 int32_t prev_sample = buf->data[fade_start + i];
-                int32_t next_sample = copy[i];
+                int32_t next_sample = src[i];
 
                 int32_t mixed = (int32_t)(prev_sample * prev_gain + next_sample * next_gain);
 
+                /* Clamp to int16 range */
                 if (mixed > 32767) mixed = 32767;
-                if (mixed < -32768) mixed = -32768;
+                else if (mixed < -32768) mixed = -32768;
 
                 buf->data[fade_start + i] = (int16_t)mixed;
             }
@@ -3204,13 +3289,13 @@ static int buffer_append_crossfade(SampleBuffer* buf, const int16_t* samples,
         /* Append the rest of the new samples (after crossfade region) */
         if (count > actual_crossfade) {
             memcpy(buf->data + buf->count,
-                   copy + actual_crossfade,
+                   src + actual_crossfade,
                    (count - actual_crossfade) * sizeof(int16_t));
             buf->count += count - actual_crossfade;
         }
     }
 
-    free(copy);
+    if (copy) free(copy);
     return CTTS_OK;
 }
 
@@ -3242,31 +3327,53 @@ static void buffer_finalize(SampleBuffer* buf, size_t fade_out_samples) {
 /*
  * Calculate cross-correlation between two signal segments.
  * Returns normalized correlation coefficient (-1.0 to 1.0).
+ * OPTIMIZED: Uses float arithmetic and loop unrolling for speed.
  */
 static float cross_correlation(const int16_t* sig1, const int16_t* sig2, size_t len) {
     if (len == 0) return 0.0f;
 
-    double sum_prod = 0.0;
-    double sum_sq1 = 0.0;
-    double sum_sq2 = 0.0;
+    float sum_prod = 0.0f;
+    float sum_sq1 = 0.0f;
+    float sum_sq2 = 0.0f;
 
-    for (size_t i = 0; i < len; i++) {
-        double s1 = (double)sig1[i];
-        double s2 = (double)sig2[i];
+    /* Process 4 samples at a time for better cache utilization */
+    size_t i = 0;
+    size_t len4 = len & ~3;  /* Round down to multiple of 4 */
+
+    for (; i < len4; i += 4) {
+        float s1_0 = (float)sig1[i];
+        float s1_1 = (float)sig1[i+1];
+        float s1_2 = (float)sig1[i+2];
+        float s1_3 = (float)sig1[i+3];
+        float s2_0 = (float)sig2[i];
+        float s2_1 = (float)sig2[i+1];
+        float s2_2 = (float)sig2[i+2];
+        float s2_3 = (float)sig2[i+3];
+
+        sum_prod += s1_0 * s2_0 + s1_1 * s2_1 + s1_2 * s2_2 + s1_3 * s2_3;
+        sum_sq1 += s1_0 * s1_0 + s1_1 * s1_1 + s1_2 * s1_2 + s1_3 * s1_3;
+        sum_sq2 += s2_0 * s2_0 + s2_1 * s2_1 + s2_2 * s2_2 + s2_3 * s2_3;
+    }
+
+    /* Handle remaining samples */
+    for (; i < len; i++) {
+        float s1 = (float)sig1[i];
+        float s2 = (float)sig2[i];
         sum_prod += s1 * s2;
         sum_sq1 += s1 * s1;
         sum_sq2 += s2 * s2;
     }
 
-    double denom = sqrt(sum_sq1 * sum_sq2);
-    if (denom < 1.0) return 0.0f;
+    float denom = sqrtf(sum_sq1 * sum_sq2);
+    if (denom < 1.0f) return 0.0f;
 
-    return (float)(sum_prod / denom);
+    return sum_prod / denom;
 }
 
 /*
  * Find the best matching position within search window using cross-correlation.
  * Returns the offset from nominal_pos that gives best waveform similarity.
+ * OPTIMIZED: Uses coarse-to-fine search to reduce correlation computations.
  */
 static int find_best_match_wsola(const int16_t* input, size_t input_count,
                                   const int16_t* prev_frame, size_t overlap_len,
@@ -3276,21 +3383,42 @@ static int find_best_match_wsola(const int16_t* input, size_t input_count,
         return 0;  /* First frame, no search needed */
     }
 
+    const int16_t* target = prev_frame + frame_size - overlap_len;
+
+    /* Coarse search: check every 4th position first */
     float best_corr = -2.0f;
     int best_offset = 0;
+    int coarse_step = 4;
 
-    /* Search within ±max_shift samples of nominal position */
-    for (int offset = -max_shift; offset <= max_shift; offset++) {
-        size_t candidate_pos = nominal_pos + offset;
+    for (int offset = -max_shift; offset <= max_shift; offset += coarse_step) {
+        int candidate_pos = (int)nominal_pos + offset;
 
         /* Check bounds */
-        if (candidate_pos + frame_size > input_count) continue;
-        if (candidate_pos < (size_t)(offset < 0 ? -offset : 0)) continue;
+        if (candidate_pos < 0) continue;
+        if ((size_t)candidate_pos + frame_size > input_count) continue;
 
-        /* Compare overlap region with previous frame's end */
-        float corr = cross_correlation(input + candidate_pos,
-                                        prev_frame + frame_size - overlap_len,
-                                        overlap_len);
+        float corr = cross_correlation(input + candidate_pos, target, overlap_len);
+
+        if (corr > best_corr) {
+            best_corr = corr;
+            best_offset = offset;
+        }
+    }
+
+    /* Fine search: check around the best coarse position */
+    int fine_start = best_offset - coarse_step + 1;
+    int fine_end = best_offset + coarse_step - 1;
+    if (fine_start < -max_shift) fine_start = -max_shift;
+    if (fine_end > max_shift) fine_end = max_shift;
+
+    for (int offset = fine_start; offset <= fine_end; offset++) {
+        if (offset == best_offset) continue;  /* Already checked */
+
+        int candidate_pos = (int)nominal_pos + offset;
+        if (candidate_pos < 0) continue;
+        if ((size_t)candidate_pos + frame_size > input_count) continue;
+
+        float corr = cross_correlation(input + candidate_pos, target, overlap_len);
 
         if (corr > best_corr) {
             best_corr = corr;
@@ -3439,6 +3567,9 @@ int ctts_synthesize(CTTS* engine, const char* text,
     if (!engine || !text || !samples || !sample_count) {
         return CTTS_ERR_INVALID_ARG;
     }
+
+    /* Initialize lookup tables (once) */
+    init_fade_luts();
 
     /* Get config */
     CTTSConfig* config = &engine->config;
