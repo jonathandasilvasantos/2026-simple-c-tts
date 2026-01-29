@@ -2450,8 +2450,74 @@ static void buffer_finalize(SampleBuffer* buf, size_t fade_out_samples) {
 }
 
 /* ============================================================================
- * Time Stretching (PSOLA-like)
+ * Time Stretching using WSOLA (Waveform Similarity Overlap-Add)
+ *
+ * WSOLA improves on basic OLA by searching for the best matching waveform
+ * position within a search window, reducing phase discontinuities and artifacts.
+ * This preserves pitch while changing speed.
  * ============================================================================ */
+
+/*
+ * Calculate cross-correlation between two signal segments.
+ * Returns normalized correlation coefficient (-1.0 to 1.0).
+ */
+static float cross_correlation(const int16_t* sig1, const int16_t* sig2, size_t len) {
+    if (len == 0) return 0.0f;
+
+    double sum_prod = 0.0;
+    double sum_sq1 = 0.0;
+    double sum_sq2 = 0.0;
+
+    for (size_t i = 0; i < len; i++) {
+        double s1 = (double)sig1[i];
+        double s2 = (double)sig2[i];
+        sum_prod += s1 * s2;
+        sum_sq1 += s1 * s1;
+        sum_sq2 += s2 * s2;
+    }
+
+    double denom = sqrt(sum_sq1 * sum_sq2);
+    if (denom < 1.0) return 0.0f;
+
+    return (float)(sum_prod / denom);
+}
+
+/*
+ * Find the best matching position within search window using cross-correlation.
+ * Returns the offset from nominal_pos that gives best waveform similarity.
+ */
+static int find_best_match_wsola(const int16_t* input, size_t input_count,
+                                  const int16_t* prev_frame, size_t overlap_len,
+                                  size_t nominal_pos, size_t frame_size,
+                                  int max_shift) {
+    if (prev_frame == NULL || overlap_len == 0) {
+        return 0;  /* First frame, no search needed */
+    }
+
+    float best_corr = -2.0f;
+    int best_offset = 0;
+
+    /* Search within ±max_shift samples of nominal position */
+    for (int offset = -max_shift; offset <= max_shift; offset++) {
+        size_t candidate_pos = nominal_pos + offset;
+
+        /* Check bounds */
+        if (candidate_pos + frame_size > input_count) continue;
+        if (candidate_pos < (size_t)(offset < 0 ? -offset : 0)) continue;
+
+        /* Compare overlap region with previous frame's end */
+        float corr = cross_correlation(input + candidate_pos,
+                                        prev_frame + frame_size - overlap_len,
+                                        overlap_len);
+
+        if (corr > best_corr) {
+            best_corr = corr;
+            best_offset = offset;
+        }
+    }
+
+    return best_offset;
+}
 
 static int time_stretch(const int16_t* input, size_t input_count,
                         int16_t** output, size_t* output_count,
@@ -2459,19 +2525,33 @@ static int time_stretch(const int16_t* input, size_t input_count,
     if (speed_factor < CTTS_MIN_SPEED) speed_factor = CTTS_MIN_SPEED;
     if (speed_factor > CTTS_MAX_SPEED) speed_factor = CTTS_MAX_SPEED;
 
-    /* Frame parameters */
-    const size_t frame_size = 441;  /* 20ms at 22050 Hz */
-    const size_t analysis_hop = frame_size / 4;
-    size_t synthesis_hop = (size_t)(analysis_hop / speed_factor);
+    /* If speed is very close to 1.0, just copy the input */
+    if (fabsf(speed_factor - 1.0f) < 0.01f) {
+        *output = malloc(input_count * sizeof(int16_t));
+        if (!*output) return CTTS_ERR_OUT_OF_MEMORY;
+        memcpy(*output, input, input_count * sizeof(int16_t));
+        *output_count = input_count;
+        return CTTS_OK;
+    }
 
-    /* Calculate output size */
-    size_t num_frames = (input_count - frame_size) / analysis_hop + 1;
-    *output_count = num_frames * synthesis_hop + frame_size;
+    /* WSOLA Frame parameters */
+    const size_t frame_size = 512;      /* ~23ms at 22050 Hz - slightly larger for better quality */
+    const size_t analysis_hop = frame_size / 4;  /* 75% overlap */
+    const size_t overlap_len = frame_size - analysis_hop;  /* Overlap region for correlation */
+    const int max_shift = (int)(frame_size * 0.25f);  /* Search window: ±25% of frame */
+
+    size_t synthesis_hop = (size_t)(analysis_hop / speed_factor);
+    if (synthesis_hop < 1) synthesis_hop = 1;
+
+    /* Calculate output size with some extra buffer */
+    size_t num_frames = (input_count > frame_size) ?
+                        (input_count - frame_size) / analysis_hop + 1 : 1;
+    *output_count = num_frames * synthesis_hop + frame_size + 1024;
 
     *output = calloc(*output_count, sizeof(int16_t));
     if (!*output) return CTTS_ERR_OUT_OF_MEMORY;
 
-    /* Precompute window */
+    /* Precompute Hanning window */
     float* window = malloc(frame_size * sizeof(float));
     if (!window) {
         free(*output);
@@ -2489,35 +2569,76 @@ static int time_stretch(const int16_t* input, size_t input_count,
         return CTTS_ERR_OUT_OF_MEMORY;
     }
 
-    /* Process frames */
-    size_t analysis_pos = 0;
-    size_t synthesis_pos = 0;
+    /* Buffer to store previous frame for correlation */
+    int16_t* prev_frame = malloc(frame_size * sizeof(int16_t));
+    if (!prev_frame) {
+        free(*output);
+        free(window);
+        free(norm);
+        return CTTS_ERR_OUT_OF_MEMORY;
+    }
+    int have_prev_frame = 0;
 
-    while (analysis_pos + frame_size <= input_count &&
+    /* Process frames using WSOLA */
+    size_t nominal_analysis_pos = 0;
+    size_t synthesis_pos = 0;
+    size_t actual_output_len = 0;
+
+    while (nominal_analysis_pos + frame_size <= input_count &&
            synthesis_pos + frame_size <= *output_count) {
-        /* Overlap-add with window */
-        for (size_t i = 0; i < frame_size; i++) {
-            float sample = input[analysis_pos + i] * window[i];
-            (*output)[synthesis_pos + i] += (int16_t)sample;
-            norm[synthesis_pos + i] += window[i];
+
+        /* Find best matching position using cross-correlation */
+        int offset = 0;
+        if (have_prev_frame) {
+            offset = find_best_match_wsola(input, input_count,
+                                            prev_frame, overlap_len,
+                                            nominal_analysis_pos, frame_size,
+                                            max_shift);
         }
 
-        analysis_pos += analysis_hop;
+        size_t actual_analysis_pos = nominal_analysis_pos + offset;
+
+        /* Ensure we don't go out of bounds */
+        if (actual_analysis_pos + frame_size > input_count) {
+            actual_analysis_pos = input_count - frame_size;
+        }
+
+        /* Window and overlap-add the frame */
+        for (size_t i = 0; i < frame_size; i++) {
+            float sample = input[actual_analysis_pos + i] * window[i];
+            (*output)[synthesis_pos + i] += (int16_t)sample;
+            norm[synthesis_pos + i] += window[i];
+
+            /* Store for next iteration's correlation */
+            prev_frame[i] = input[actual_analysis_pos + i];
+        }
+        have_prev_frame = 1;
+
+        /* Track actual output length */
+        if (synthesis_pos + frame_size > actual_output_len) {
+            actual_output_len = synthesis_pos + frame_size;
+        }
+
+        nominal_analysis_pos += analysis_hop;
         synthesis_pos += synthesis_hop;
     }
 
-    /* Normalize */
-    for (size_t i = 0; i < *output_count; i++) {
+    /* Normalize by accumulated window energy */
+    for (size_t i = 0; i < actual_output_len; i++) {
         if (norm[i] > 0.01f) {
             float val = (*output)[i] / norm[i];
-            if (val > 32767) val = 32767;
-            if (val < -32768) val = -32768;
+            if (val > 32767.0f) val = 32767.0f;
+            if (val < -32768.0f) val = -32768.0f;
             (*output)[i] = (int16_t)val;
         }
     }
 
     free(window);
     free(norm);
+    free(prev_frame);
+
+    /* Trim to actual output length */
+    *output_count = actual_output_len;
 
     /* Trim trailing silence */
     while (*output_count > 0 && (*output)[*output_count - 1] == 0) {
