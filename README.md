@@ -11,6 +11,9 @@ A lightweight, pure C implementation of a concatenative Text-to-Speech (TTS) eng
 - **Smooth concatenation** - Raised-cosine crossfade between units
 - **Speed control** - PSOLA-based time stretching (0.5x to 2.0x) without pitch distortion
 - **Text normalization rules** - CSV-based regex rules for pronunciation customization
+- **Number expansion** - Converts numbers to Portuguese words (e.g., 123 → "cento e vinte e três")
+- **Abbreviation expansion** - Expands common abbreviations via normalization.csv
+- **Punctuation-aware pauses** - Different pause durations for commas, periods, questions, etc.
 - **Energy normalization** - Consistent volume across concatenated units
 - **Adaptive crossfade** - Phoneme-aware crossfade durations for natural transitions
 - **Pitch smoothing** - Reduces pitch discontinuities at unit boundaries
@@ -226,6 +229,28 @@ The engine includes several features to improve speech naturalness:
 - **Question intonation**: Rising pitch on final words for questions (?)
 - **Exclamation**: Higher energy and pitch for exclamations (!)
 - **Declination**: Gradual pitch/energy lowering through sentence (~8%)
+
+**Number Expansion**
+Automatically converts numbers to Portuguese words:
+- `123` → "cento e vinte e três"
+- `1000` → "mil"
+- `2500` → "dois mil e quinhentos"
+- Supports numbers up to billions
+
+**Punctuation-Aware Pauses**
+Different pause durations based on punctuation:
+| Punctuation | Pause |
+|-------------|-------|
+| `,` (comma) | 50ms |
+| `;` `:` | 70ms |
+| `.` `?` | 120ms |
+| `!` | 130ms |
+
+**Abbreviation Expansion**
+Common abbreviations are expanded via `normalization.csv`:
+- `Dr.` → "doutor", `Sra.` → "senhora"
+- `km` → "quilômetros", `kg` → "quilogramas"
+- `jan.` → "janeiro", `fev.` → "fevereiro"
 
 ## API
 

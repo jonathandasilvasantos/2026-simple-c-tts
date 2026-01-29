@@ -462,6 +462,203 @@ void ctts_free_normalization(void) {
 }
 
 /* ============================================================================
+ * Number Expansion (Portuguese)
+ * ============================================================================ */
+
+static const char* units_pt[] = {
+    "", "um", "dois", "três", "quatro", "cinco",
+    "seis", "sete", "oito", "nove", "dez",
+    "onze", "doze", "treze", "quatorze", "quinze",
+    "dezesseis", "dezessete", "dezoito", "dezenove"
+};
+
+static const char* tens_pt[] = {
+    "", "", "vinte", "trinta", "quarenta", "cinquenta",
+    "sessenta", "setenta", "oitenta", "noventa"
+};
+
+static const char* hundreds_pt[] = {
+    "", "cento", "duzentos", "trezentos", "quatrocentos", "quinhentos",
+    "seiscentos", "setecentos", "oitocentos", "novecentos"
+};
+
+/* Convert number 0-999 to Portuguese words */
+static void number_to_words_pt(int n, char* buf, size_t buf_size) {
+    if (n == 0) {
+        strncpy(buf, "zero", buf_size);
+        return;
+    }
+
+    buf[0] = '\0';
+
+    if (n == 100) {
+        strncpy(buf, "cem", buf_size);
+        return;
+    }
+
+    int h = n / 100;
+    int t = (n % 100) / 10;
+    int u = n % 10;
+
+    if (h > 0) {
+        strncat(buf, hundreds_pt[h], buf_size - strlen(buf) - 1);
+    }
+
+    if (n % 100 > 0) {
+        if (h > 0) strncat(buf, " e ", buf_size - strlen(buf) - 1);
+
+        if (n % 100 < 20) {
+            strncat(buf, units_pt[n % 100], buf_size - strlen(buf) - 1);
+        } else {
+            strncat(buf, tens_pt[t], buf_size - strlen(buf) - 1);
+            if (u > 0) {
+                strncat(buf, " e ", buf_size - strlen(buf) - 1);
+                strncat(buf, units_pt[u], buf_size - strlen(buf) - 1);
+            }
+        }
+    }
+}
+
+/* Convert full number to Portuguese words */
+static void full_number_to_words_pt(long n, char* buf, size_t buf_size) {
+    if (n == 0) {
+        strncpy(buf, "zero", buf_size);
+        return;
+    }
+
+    if (n < 0) {
+        strncpy(buf, "menos ", buf_size);
+        n = -n;
+    } else {
+        buf[0] = '\0';
+    }
+
+    if (n >= 1000000000) {
+        /* Billions */
+        int billions = n / 1000000000;
+        char temp[64];
+        number_to_words_pt(billions, temp, sizeof(temp));
+        strncat(buf, temp, buf_size - strlen(buf) - 1);
+        strncat(buf, billions == 1 ? " bilhão" : " bilhões", buf_size - strlen(buf) - 1);
+        n %= 1000000000;
+        if (n > 0) strncat(buf, " e ", buf_size - strlen(buf) - 1);
+    }
+
+    if (n >= 1000000) {
+        /* Millions */
+        int millions = n / 1000000;
+        char temp[64];
+        number_to_words_pt(millions, temp, sizeof(temp));
+        strncat(buf, temp, buf_size - strlen(buf) - 1);
+        strncat(buf, millions == 1 ? " milhão" : " milhões", buf_size - strlen(buf) - 1);
+        n %= 1000000;
+        if (n > 0) strncat(buf, " e ", buf_size - strlen(buf) - 1);
+    }
+
+    if (n >= 1000) {
+        /* Thousands */
+        int thousands = n / 1000;
+        if (thousands == 1) {
+            strncat(buf, "mil", buf_size - strlen(buf) - 1);
+        } else {
+            char temp[64];
+            number_to_words_pt(thousands, temp, sizeof(temp));
+            strncat(buf, temp, buf_size - strlen(buf) - 1);
+            strncat(buf, " mil", buf_size - strlen(buf) - 1);
+        }
+        n %= 1000;
+        if (n > 0) {
+            if (n < 100) {
+                strncat(buf, " e ", buf_size - strlen(buf) - 1);
+            } else {
+                strncat(buf, " ", buf_size - strlen(buf) - 1);
+            }
+        }
+    }
+
+    if (n > 0) {
+        char temp[64];
+        number_to_words_pt(n, temp, sizeof(temp));
+        strncat(buf, temp, buf_size - strlen(buf) - 1);
+    }
+}
+
+/* Expand numbers in text to Portuguese words */
+static char* expand_numbers(const char* text) {
+    size_t len = strlen(text);
+    size_t buf_size = len * 20 + 1024;  /* Numbers can expand significantly */
+    char* result = malloc(buf_size);
+    if (!result) return strdup(text);
+
+    char* dst = result;
+    const char* src = text;
+    size_t remaining = buf_size - 1;
+
+    while (*src && remaining > 0) {
+        /* Check for number sequence */
+        if (*src >= '0' && *src <= '9') {
+            /* Parse the number */
+            long num = 0;
+            const char* num_start = src;
+            while (*src >= '0' && *src <= '9') {
+                num = num * 10 + (*src - '0');
+                src++;
+            }
+
+            /* Convert to words */
+            char words[256];
+            full_number_to_words_pt(num, words, sizeof(words));
+
+            /* Copy words to result */
+            size_t word_len = strlen(words);
+            if (word_len > remaining) word_len = remaining;
+            memcpy(dst, words, word_len);
+            dst += word_len;
+            remaining -= word_len;
+        } else {
+            *dst++ = *src++;
+            remaining--;
+        }
+    }
+    *dst = '\0';
+
+    return result;
+}
+
+/* Note: Abbreviation expansion is handled via normalization.csv for flexibility */
+
+/* ============================================================================
+ * Punctuation Pause Durations
+ * ============================================================================ */
+
+/* Get pause duration in milliseconds for punctuation */
+static float get_punctuation_pause_ms(char punct, const CTTSConfig* config) {
+    switch (punct) {
+        case ',':
+            return config->word_pause_ms * 0.5f;   /* 50% - brief pause */
+        case ';':
+            return config->word_pause_ms * 0.7f;   /* 70% - medium pause */
+        case ':':
+            return config->word_pause_ms * 0.7f;   /* 70% - medium pause */
+        case '.':
+            return config->word_pause_ms * 1.2f;   /* 120% - full pause */
+        case '!':
+            return config->word_pause_ms * 1.3f;   /* 130% - emphatic pause */
+        case '?':
+            return config->word_pause_ms * 1.2f;   /* 120% - full pause */
+        case '-':
+            return 0.0f;                            /* No pause (soft separator) */
+        default:
+            return config->word_pause_ms;          /* Default pause */
+    }
+}
+
+/* Check if character is sentence-ending punctuation */
+static int is_sentence_end(char c) {
+    return (c == '.' || c == '!' || c == '?');
+}
+
+/* ============================================================================
  * WAV File I/O
  * ============================================================================ */
 
@@ -2347,14 +2544,17 @@ int ctts_synthesize(CTTS* engine, const char* text,
     ProsodyContext prosody;
     analyze_prosody(text, &prosody);
 
-    /* Load normalization rules from CSV (once) */
-    ctts_load_normalization("normalization.csv");
+    /* Step 1: Expand numbers to words */
+    char* numbers_expanded = expand_numbers(text);
+    if (!numbers_expanded) return CTTS_ERR_OUT_OF_MEMORY;
 
-    /* Apply CSV normalization rules first (regex replacements) */
-    char* rule_normalized = ctts_apply_normalization(text);
+    /* Step 2: Load and apply CSV normalization rules (includes abbreviations) */
+    ctts_load_normalization("normalization.csv");
+    char* rule_normalized = ctts_apply_normalization(numbers_expanded);
+    free(numbers_expanded);
     if (!rule_normalized) return CTTS_ERR_OUT_OF_MEMORY;
 
-    /* Then apply standard normalization (lowercase) */
+    /* Step 3: Apply standard normalization (lowercase) */
     char* normalized = ctts_normalize(rule_normalized);
     free(rule_normalized);
     if (!normalized) return CTTS_ERR_OUT_OF_MEMORY;
@@ -2448,6 +2648,43 @@ int ctts_synthesize(CTTS* engine, const char* text,
             pos++;
             /* Don't reset prev_was_word_boundary - allow smooth crossfade to continue */
             /* Don't add any silence - just skip the separator */
+            continue;
+        }
+
+        /* Handle punctuation with appropriate pauses */
+        if (*pos == ',' || *pos == ';' || *pos == ':' ||
+            *pos == '.' || *pos == '!' || *pos == '?') {
+
+            /* Get punctuation-specific pause duration */
+            float pause_ms = get_punctuation_pause_ms(*pos, config);
+            size_t pause_samples = (size_t)(pause_ms * CTTS_SAMPLE_RATE / 1000.0f);
+
+            /* Apply fade-out before pause if we have audio */
+            if (buf.count > 0) {
+                size_t fade_samples = (size_t)(config->fade_out_ms * CTTS_SAMPLE_RATE / 1000.0f);
+                apply_fade_out(buf.data, buf.count, fade_samples);
+            }
+
+            /* Add punctuation pause */
+            if (pause_samples > 0) {
+                buffer_append_silence(&buf, pause_samples);
+            }
+
+            /* Sentence-ending punctuation resets prosody tracking */
+            if (is_sentence_end(*pos)) {
+                current_word_index = 0;
+                word_start_sample = buf.count;
+            }
+
+            pos++;
+            prev_was_word_boundary = 1;
+            continue;
+        }
+
+        /* Skip other non-speech characters */
+        if (*pos == '(' || *pos == ')' || *pos == '[' || *pos == ']' ||
+            *pos == '"' || *pos == '\'' || *pos == '`') {
+            pos++;
             continue;
         }
 

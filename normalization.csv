@@ -30,3 +30,45 @@ oia\b,o-i-a
 oio\b,o-i-o
 uia\b,u-i-a
 uio\b,u-i-o
+
+# Abbreviations - Titles
+\bSr\.,senhor
+\bSra\.,senhora
+\bDr\.,doutor
+\bDra\.,doutora
+\bProf\.,professor
+\bProfa\.,professora
+
+# Abbreviations - Common
+\betc\.,etcétera
+\bex\.,exemplo
+\bpág\.,página
+\bvol\.,volume
+\bcap\.,capítulo
+\btel\.,telefone
+\bcel\.,celular
+
+# Abbreviations - Units (with word boundary)
+\bkm\b,quilômetros
+\bkg\b,quilogramas
+\bmg\b,miligramas
+\bml\b,mililitros
+\bcm\b,centímetros
+\bmm\b,milímetros
+
+# Abbreviations - Time
+\bmin\.,minutos
+\bseg\.,segundos
+
+# Abbreviations - Months
+\bjan\.,janeiro
+\bfev\.,fevereiro
+\bmar\.,março
+\babr\.,abril
+\bjun\.,junho
+\bjul\.,julho
+\bago\.,agosto
+\bset\.,setembro
+\bout\.,outubro
+\bnov\.,novembro
+\bdez\.,dezembro
