@@ -1977,6 +1977,15 @@ int ctts_synthesize(CTTS* engine, const char* text,
             continue;
         }
 
+        /* Soft syllable separator: hyphen creates smooth transition without pause */
+        /* Used for hiatus and other cases where vowels should flow together */
+        if (*pos == '-') {
+            pos++;
+            /* Don't reset prev_was_word_boundary - allow smooth crossfade to continue */
+            /* Don't add any silence - just skip the separator */
+            continue;
+        }
+
         /* Use greedy matching with look-ahead and Portuguese rules */
         int unit_idx;
         size_t match_len = find_best_match_with_lookahead(

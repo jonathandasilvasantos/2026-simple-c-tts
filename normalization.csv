@@ -1,12 +1,32 @@
 # Normalization rules: pattern,replacement (one per line)
 # Supports POSIX Extended Regex, use \b for word boundaries
 # Use \1, \2, etc. for backreferences in replacements
+
+# R at word start gets double r sound
 \br,rr
+
+# Specific word corrections
 música,muzica
 brasil,brazil
+
+# Word-final t gets i sound
 t\b,ti
+
+# S between vowels becomes z sound (Brazilian Portuguese)
 ([a-z])sa,\1za
 ([a-z])se,\1ze
 ([a-z])si,\1zi
 ([a-z])so,\1zo
 ([a-z])su,\1zu
+
+# Hiatos - separate vowels that should not form diphthongs
+# Use hyphen (-) for smooth transitions without word pauses
+# These patterns at word endings are pronounced as separate syllables
+aia\b,a-i-a
+aio\b,a-i-o
+eia\b,e-i-a
+eio\b,e-i-o
+oia\b,o-i-a
+oio\b,o-i-o
+uia\b,u-i-a
+uio\b,u-i-o
