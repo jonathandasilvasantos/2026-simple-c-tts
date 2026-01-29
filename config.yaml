@@ -44,7 +44,7 @@ audio:
   # Silence duration between words (milliseconds)
   # This is pure silence, no crossfade
   # Recommended: 80-150ms for natural speech
-  word_pause_ms: 100
+  word_pause_ms: 60
 
   # Silence duration for unknown/missing characters (milliseconds)
   unknown_silence_ms: 30
@@ -73,7 +73,7 @@ processing:
 # Synthesis settings
 synthesis:
   # Default speech speed (0.5 = half speed, 2.0 = double speed)
-  default_speed: 1.0
+  default_speed: 1.2
 
   # Minimum speed allowed
   min_speed: 0.5

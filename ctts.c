@@ -1966,7 +1966,621 @@ static void smooth_pitch_boundary(int16_t* prev_samples, size_t prev_count,
 }
 
 /* ============================================================================
- * Prosody Processing
+ * TD-PSOLA Pitch Modification (Smooth Pitch Changes)
+ * ============================================================================ */
+
+/*
+ * TD-PSOLA (Time-Domain Pitch-Synchronous Overlap-Add)
+ * Provides smooth pitch modification without artifacts.
+ *
+ * Algorithm:
+ * 1. Find pitch periods using autocorrelation
+ * 2. Extract pitch-synchronous frames
+ * 3. Apply Hanning window to each frame
+ * 4. Resample frames for pitch change
+ * 5. Overlap-add with smooth blending
+ */
+
+/* Find pitch period at a specific position */
+static size_t find_pitch_period(const int16_t* samples, size_t count, size_t pos) {
+    if (pos + 600 > count) return 0;
+
+    /* Search for pitch in range 80-400 Hz */
+    size_t min_period = CTTS_SAMPLE_RATE / 400;  /* ~55 samples */
+    size_t max_period = CTTS_SAMPLE_RATE / 80;   /* ~275 samples */
+
+    size_t analysis_len = 200;
+    if (pos + analysis_len + max_period > count) {
+        analysis_len = count - pos - max_period;
+    }
+    if (analysis_len < 100) return 0;
+
+    float best_corr = 0.0f;
+    size_t best_period = 0;
+
+    for (size_t period = min_period; period <= max_period; period++) {
+        float corr = 0.0f;
+        float energy1 = 0.0f;
+        float energy2 = 0.0f;
+
+        for (size_t i = 0; i < analysis_len; i++) {
+            float s1 = samples[pos + i];
+            float s2 = samples[pos + i + period];
+            corr += s1 * s2;
+            energy1 += s1 * s1;
+            energy2 += s2 * s2;
+        }
+
+        float norm = sqrtf(energy1 * energy2);
+        if (norm > 0) corr /= norm;
+
+        if (corr > best_corr) {
+            best_corr = corr;
+            best_period = period;
+        }
+    }
+
+    /* Return period only if correlation is strong (voiced) */
+    if (best_corr > 0.25f && best_period > 0) {
+        return best_period;
+    }
+
+    return 0;  /* Unvoiced */
+}
+
+/*
+ * Apply smooth pitch modification using TD-PSOLA
+ * pitch_factor > 1.0 = higher pitch, < 1.0 = lower pitch
+ * Supports up to ±30% pitch change smoothly
+ */
+static int apply_td_psola_pitch(const int16_t* input, size_t input_count,
+                                 int16_t** output, size_t* output_count,
+                                 float pitch_factor) {
+    /* Clamp pitch factor to safe range */
+    if (pitch_factor < 0.7f) pitch_factor = 0.7f;
+    if (pitch_factor > 1.3f) pitch_factor = 1.3f;
+
+    /* If pitch change is minimal, just copy */
+    if (fabsf(pitch_factor - 1.0f) < 0.02f) {
+        *output = malloc(input_count * sizeof(int16_t));
+        if (!*output) return CTTS_ERR_OUT_OF_MEMORY;
+        memcpy(*output, input, input_count * sizeof(int16_t));
+        *output_count = input_count;
+        return CTTS_OK;
+    }
+
+    /* Allocate output buffer (same size as input for pitch-only change) */
+    *output = calloc(input_count, sizeof(int16_t));
+    if (!*output) return CTTS_ERR_OUT_OF_MEMORY;
+
+    /* Normalization accumulator */
+    float* norm = calloc(input_count, sizeof(float));
+    if (!norm) {
+        free(*output);
+        return CTTS_ERR_OUT_OF_MEMORY;
+    }
+
+    /* Process using pitch-synchronous frames */
+    size_t pos = 0;
+    size_t out_pos = 0;
+
+    while (pos < input_count - 600) {
+        /* Find pitch period at current position */
+        size_t period = find_pitch_period(input, input_count, pos);
+
+        /* Use default frame size for unvoiced regions */
+        size_t frame_size = (period > 0) ? period * 2 : 441;  /* 2 periods or 20ms */
+        if (frame_size > input_count - pos) frame_size = input_count - pos;
+
+        /* Calculate new period for pitch change */
+        size_t new_period = (period > 0) ? (size_t)(period / pitch_factor) : frame_size / 2;
+        if (new_period < 20) new_period = 20;
+
+        /* Extract and window the frame */
+        for (size_t i = 0; i < frame_size && out_pos + i < input_count; i++) {
+            /* Hanning window */
+            float window = 0.5f * (1.0f - cosf(2.0f * PI * i / frame_size));
+
+            /* Resample for pitch change */
+            float src_idx = i * pitch_factor;
+            size_t idx = (size_t)src_idx;
+            float frac = src_idx - idx;
+
+            float sample;
+            if (idx + 1 < frame_size && pos + idx + 1 < input_count) {
+                sample = input[pos + idx] * (1.0f - frac) + input[pos + idx + 1] * frac;
+            } else if (pos + idx < input_count) {
+                sample = input[pos + idx];
+            } else {
+                sample = 0;
+            }
+
+            /* Apply window and accumulate */
+            (*output)[out_pos + i] += (int16_t)(sample * window);
+            norm[out_pos + i] += window;
+        }
+
+        /* Advance by half frame (50% overlap for smoothness) */
+        size_t hop = frame_size / 2;
+        if (hop < 50) hop = 50;
+        pos += hop;
+        out_pos += hop;
+    }
+
+    /* Normalize output */
+    for (size_t i = 0; i < input_count; i++) {
+        if (norm[i] > 0.01f) {
+            float val = (*output)[i] / norm[i];
+            if (val > 32767.0f) val = 32767.0f;
+            if (val < -32768.0f) val = -32768.0f;
+            (*output)[i] = (int16_t)val;
+        }
+    }
+
+    free(norm);
+    *output_count = input_count;
+
+    return CTTS_OK;
+}
+
+/*
+ * Apply smooth pitch contour over a segment
+ * start_factor: pitch factor at beginning
+ * end_factor: pitch factor at end
+ * Uses cubic interpolation for smooth transition
+ */
+static void apply_smooth_pitch_contour(int16_t* samples, size_t count,
+                                        float start_factor, float end_factor) {
+    if (count < 100 || fabsf(start_factor - end_factor) < 0.01f) return;
+
+    /* Process in small overlapping frames for smoothness */
+    size_t frame_size = 256;
+    size_t hop = frame_size / 2;
+
+    int16_t* temp = malloc(count * sizeof(int16_t));
+    if (!temp) return;
+    memcpy(temp, samples, count * sizeof(int16_t));
+
+    float* norm = calloc(count, sizeof(float));
+    if (!norm) {
+        free(temp);
+        return;
+    }
+
+    memset(samples, 0, count * sizeof(int16_t));
+
+    for (size_t pos = 0; pos + frame_size <= count; pos += hop) {
+        /* Calculate pitch factor at this position using smooth interpolation */
+        float t = (float)pos / (count - frame_size);
+        /* Cubic smoothstep for very smooth transition */
+        float smooth_t = t * t * (3.0f - 2.0f * t);
+        float pitch_factor = start_factor + (end_factor - start_factor) * smooth_t;
+
+        /* Apply pitch modification to this frame */
+        for (size_t i = 0; i < frame_size; i++) {
+            float window = 0.5f * (1.0f - cosf(2.0f * PI * i / frame_size));
+
+            /* Resample */
+            float src_idx = i * pitch_factor;
+            size_t idx = (size_t)src_idx;
+            float frac = src_idx - idx;
+
+            float sample;
+            if (idx + 1 < frame_size) {
+                sample = temp[pos + idx] * (1.0f - frac) + temp[pos + idx + 1] * frac;
+            } else {
+                sample = temp[pos + idx];
+            }
+
+            samples[pos + i] += (int16_t)(sample * window);
+            norm[pos + i] += window;
+        }
+    }
+
+    /* Normalize */
+    for (size_t i = 0; i < count; i++) {
+        if (norm[i] > 0.01f) {
+            float val = samples[i] / norm[i];
+            if (val > 32767.0f) val = 32767.0f;
+            if (val < -32768.0f) val = -32768.0f;
+            samples[i] = (int16_t)val;
+        } else {
+            samples[i] = temp[i];
+        }
+    }
+
+    free(temp);
+    free(norm);
+}
+
+/* ============================================================================
+ * Duration Rules Loading and Application
+ * ============================================================================ */
+
+#define MAX_DURATION_RULES 128
+
+typedef struct {
+    char phoneme_type[32];
+    int position;       /* 0=initial, 1=medial, 2=final */
+    int stress;         /* 0=unstressed, 1=stressed */
+    float duration_factor;
+} DurationRule;
+
+static DurationRule duration_rules[MAX_DURATION_RULES];
+static size_t duration_rule_count = 0;
+static int duration_rules_loaded = 0;
+
+/* Load duration rules from CSV file */
+static int load_duration_rules(const char* csv_file) {
+    if (duration_rules_loaded) return CTTS_OK;
+
+    FILE* f = fopen(csv_file, "r");
+    if (!f) {
+        duration_rules_loaded = 1;
+        return CTTS_OK;  /* File not found is OK */
+    }
+
+    char line[256];
+    duration_rule_count = 0;
+
+    while (fgets(line, sizeof(line), f) && duration_rule_count < MAX_DURATION_RULES) {
+        /* Skip comments and empty lines */
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+
+        /* Parse: phoneme_type,position,stress,duration_factor */
+        char phoneme_type[32];
+        int position, stress;
+        float factor;
+
+        if (sscanf(line, "%31[^,],%d,%d,%f", phoneme_type, &position, &stress, &factor) == 4) {
+            strncpy(duration_rules[duration_rule_count].phoneme_type, phoneme_type, 31);
+            duration_rules[duration_rule_count].position = position;
+            duration_rules[duration_rule_count].stress = stress;
+            duration_rules[duration_rule_count].duration_factor = factor;
+            duration_rule_count++;
+        }
+    }
+
+    fclose(f);
+    duration_rules_loaded = 1;
+
+    if (duration_rule_count > 0) {
+        fprintf(stderr, "Loaded %zu duration rules\n", duration_rule_count);
+    }
+
+    return CTTS_OK;
+}
+
+/* Get duration factor for a phoneme type in context */
+static float get_duration_factor(const char* phoneme_type, int position, int stress) {
+    for (size_t i = 0; i < duration_rule_count; i++) {
+        if (strcmp(duration_rules[i].phoneme_type, phoneme_type) == 0 &&
+            duration_rules[i].position == position &&
+            duration_rules[i].stress == stress) {
+            return duration_rules[i].duration_factor;
+        }
+    }
+    return 1.0f;  /* Default: no change */
+}
+
+/* Classify phoneme type from first character */
+static const char* classify_phoneme_type(uint32_t cp) {
+    /* Lowercase */
+    if (cp >= 'A' && cp <= 'Z') cp += 32;
+
+    /* Vowels */
+    if (is_vowel(cp)) return "vowel";
+
+    /* Plosives */
+    if (cp == 'p' || cp == 'b' || cp == 't' || cp == 'd' ||
+        cp == 'k' || cp == 'g' || cp == 'c' || cp == 'q') {
+        return "plosive";
+    }
+
+    /* Fricatives */
+    if (cp == 'f' || cp == 'v' || cp == 's' || cp == 'z' ||
+        cp == 'x' || cp == 'j' || cp == 'h') {
+        return "fricative";
+    }
+
+    /* Nasals */
+    if (cp == 'm' || cp == 'n') return "nasal";
+
+    /* Liquids */
+    if (cp == 'l' || cp == 'r') return "liquid";
+
+    return "other";
+}
+
+/* ============================================================================
+ * Portuguese Stress Detection
+ * ============================================================================ */
+
+/* Check if character has stress accent */
+static int has_stress_accent(uint32_t cp) {
+    /* Acute accents */
+    if (cp == 0xE1 || cp == 0xC1 ||   /* á Á */
+        cp == 0xE9 || cp == 0xC9 ||   /* é É */
+        cp == 0xED || cp == 0xCD ||   /* í Í */
+        cp == 0xF3 || cp == 0xD3 ||   /* ó Ó */
+        cp == 0xFA || cp == 0xDA) {   /* ú Ú */
+        return 1;
+    }
+    /* Circumflex */
+    if (cp == 0xE2 || cp == 0xC2 ||   /* â Â */
+        cp == 0xEA || cp == 0xCA ||   /* ê Ê */
+        cp == 0xF4 || cp == 0xD4) {   /* ô Ô */
+        return 1;
+    }
+    return 0;
+}
+
+/*
+ * Detect stressed syllable in a Portuguese word.
+ * Returns the syllable index (0-based from start) that should be stressed.
+ *
+ * Portuguese stress rules:
+ * 1. Explicit accent marks always indicate stress
+ * 2. Words ending in 'a', 'e', 'o', 'em', 'ens' - penultimate stress
+ * 3. Words ending in 'i', 'u', consonants (except m/s) - final stress
+ * 4. Default: penultimate stress (paroxytone - most common)
+ */
+static int detect_stressed_syllable(const char* word, size_t len, int total_syllables) {
+    if (total_syllables <= 0) return 0;
+    if (total_syllables == 1) return 0;  /* Monosyllables are stressed */
+
+    /* Check for explicit accent marks */
+    const char* p = word;
+    int syllable_idx = 0;
+    int in_vowel = 0;
+
+    while (p < word + len) {
+        uint32_t cp = ctts_utf8_next(&p);
+
+        if (is_vowel(cp)) {
+            if (!in_vowel) {
+                in_vowel = 1;
+            }
+            if (has_stress_accent(cp)) {
+                return syllable_idx;  /* Accent marks stress position */
+            }
+        } else {
+            if (in_vowel) {
+                syllable_idx++;
+                in_vowel = 0;
+            }
+        }
+    }
+
+    /* No explicit accent - apply default rules */
+    /* Get last character */
+    p = word;
+    uint32_t last_cp = 0;
+    while (p < word + len) {
+        last_cp = ctts_utf8_next(&p);
+    }
+    if (last_cp >= 'A' && last_cp <= 'Z') last_cp += 32;
+
+    /* Words ending in 'i', 'u', 'l', 'r', 'z', 'x' - final stress (oxytone) */
+    if (last_cp == 'i' || last_cp == 'u' || last_cp == 'l' ||
+        last_cp == 'r' || last_cp == 'z' || last_cp == 'x') {
+        return total_syllables - 1;  /* Last syllable */
+    }
+
+    /* Default: penultimate stress (paroxytone) */
+    return (total_syllables >= 2) ? total_syllables - 2 : 0;
+}
+
+/* Count syllables in a word (approximate: count vowel groups) */
+static int count_syllables(const char* word, size_t len) {
+    int syllables = 0;
+    int in_vowel = 0;
+    const char* p = word;
+
+    while (p < word + len) {
+        uint32_t cp = ctts_utf8_next(&p);
+        if (is_vowel(cp)) {
+            if (!in_vowel) {
+                syllables++;
+                in_vowel = 1;
+            }
+        } else {
+            in_vowel = 0;
+        }
+    }
+
+    return syllables;
+}
+
+/* ============================================================================
+ * Emphasis Detection
+ * ============================================================================ */
+
+/*
+ * Detect emphasis markers in text:
+ * - ALL CAPS words
+ * - *asterisk* surrounded words
+ * - _underscore_ surrounded words
+ * - Words followed by ! in certain contexts
+ */
+typedef struct {
+    int is_emphasized;
+    float energy_boost;    /* Energy multiplier (1.0 = normal) */
+    float pitch_boost;     /* Pitch multiplier (1.0 = normal) */
+    float duration_factor; /* Duration multiplier (1.0 = normal) */
+} EmphasisInfo;
+
+static EmphasisInfo detect_emphasis(const char* word, size_t len) {
+    EmphasisInfo info = {0, 1.0f, 1.0f, 1.0f};
+
+    if (len == 0) return info;
+
+    /* Check for ALL CAPS (at least 2 uppercase letters, no lowercase) */
+    int upper_count = 0;
+    int lower_count = 0;
+    const char* p = word;
+
+    while (p < word + len) {
+        uint32_t cp = ctts_utf8_next(&p);
+        if (cp >= 'A' && cp <= 'Z') upper_count++;
+        if (cp >= 'a' && cp <= 'z') lower_count++;
+    }
+
+    if (upper_count >= 2 && lower_count == 0) {
+        info.is_emphasized = 1;
+        info.energy_boost = 1.4f;    /* +3 dB */
+        info.pitch_boost = 1.08f;    /* +8% pitch */
+        info.duration_factor = 1.15f; /* 15% longer */
+        return info;
+    }
+
+    /* Check for *asterisk* markers (word surrounded by asterisks in original) */
+    /* This would need to be detected before normalization - simplified here */
+
+    return info;
+}
+
+/* ============================================================================
+ * Phrase-Level Intonation
+ * ============================================================================ */
+
+typedef enum {
+    PHRASE_DECLARATIVE,     /* Statement - falling intonation */
+    PHRASE_INTERROGATIVE,   /* Question - rising intonation */
+    PHRASE_EXCLAMATORY,     /* Exclamation - high then falling */
+    PHRASE_CONTINUATION,    /* Comma/semicolon - slight rise */
+    PHRASE_LISTING          /* Item in a list - rise then fall */
+} PhraseType;
+
+typedef struct {
+    PhraseType type;
+    float pitch_start;      /* Starting pitch factor */
+    float pitch_end;        /* Ending pitch factor */
+    float pitch_peak;       /* Peak pitch factor (for emphasis) */
+    float peak_position;    /* Position of peak (0.0-1.0) */
+    float energy_factor;    /* Overall energy adjustment */
+    float final_lengthening; /* Duration factor for final syllable */
+} PhraseIntonation;
+
+/* Get intonation pattern for phrase type */
+static PhraseIntonation get_phrase_intonation(PhraseType type) {
+    PhraseIntonation inton;
+
+    switch (type) {
+        case PHRASE_INTERROGATIVE:
+            /* Question: slight fall then rise at end */
+            inton.pitch_start = 1.0f;
+            inton.pitch_end = 1.15f;    /* Rise at end */
+            inton.pitch_peak = 1.05f;
+            inton.peak_position = 0.3f;
+            inton.energy_factor = 1.0f;
+            inton.final_lengthening = 1.2f;
+            break;
+
+        case PHRASE_EXCLAMATORY:
+            /* Exclamation: high start, falling */
+            inton.pitch_start = 1.12f;
+            inton.pitch_end = 0.95f;
+            inton.pitch_peak = 1.15f;
+            inton.peak_position = 0.2f;
+            inton.energy_factor = 1.15f;
+            inton.final_lengthening = 1.1f;
+            break;
+
+        case PHRASE_CONTINUATION:
+            /* Continuation (comma): slight rise to indicate more coming */
+            inton.pitch_start = 1.0f;
+            inton.pitch_end = 1.05f;
+            inton.pitch_peak = 1.02f;
+            inton.peak_position = 0.5f;
+            inton.energy_factor = 0.98f;
+            inton.final_lengthening = 1.1f;
+            break;
+
+        case PHRASE_LISTING:
+            /* List item: rise-fall pattern */
+            inton.pitch_start = 1.0f;
+            inton.pitch_end = 1.03f;
+            inton.pitch_peak = 1.08f;
+            inton.peak_position = 0.6f;
+            inton.energy_factor = 1.0f;
+            inton.final_lengthening = 1.05f;
+            break;
+
+        case PHRASE_DECLARATIVE:
+        default:
+            /* Statement: gradual decline (declination) */
+            inton.pitch_start = 1.02f;
+            inton.pitch_end = 0.92f;
+            inton.pitch_peak = 1.02f;
+            inton.peak_position = 0.1f;
+            inton.energy_factor = 1.0f;
+            inton.final_lengthening = 1.15f;
+            break;
+    }
+
+    return inton;
+}
+
+/*
+ * Apply phrase intonation contour to samples
+ * Uses smooth interpolation for natural pitch movement
+ */
+static void apply_phrase_intonation(int16_t* samples, size_t count,
+                                     PhraseIntonation* inton,
+                                     int word_index, int total_words) {
+    if (count < 100 || total_words == 0) return;
+
+    /* Calculate position in phrase */
+    float phrase_pos = (float)word_index / (float)(total_words > 1 ? total_words - 1 : 1);
+
+    /* Calculate pitch factor at this position using the intonation pattern */
+    float pitch_factor;
+
+    if (phrase_pos <= inton->peak_position) {
+        /* Before peak: interpolate from start to peak */
+        float t = phrase_pos / inton->peak_position;
+        t = t * t * (3.0f - 2.0f * t);  /* Smoothstep */
+        pitch_factor = inton->pitch_start + (inton->pitch_peak - inton->pitch_start) * t;
+    } else {
+        /* After peak: interpolate from peak to end */
+        float t = (phrase_pos - inton->peak_position) / (1.0f - inton->peak_position);
+        t = t * t * (3.0f - 2.0f * t);  /* Smoothstep */
+        pitch_factor = inton->pitch_peak + (inton->pitch_end - inton->pitch_peak) * t;
+    }
+
+    /* Apply energy factor */
+    float energy = inton->energy_factor;
+
+    /* Apply final lengthening for last word */
+    /* (Duration is handled separately) */
+
+    /* Apply smooth pitch contour within this word */
+    /* Word-internal: slight rise then fall for natural contour */
+    float word_start = pitch_factor * 0.98f;
+    float word_end = pitch_factor * 1.02f;
+
+    /* For final word, apply the phrase-final pitch */
+    if (word_index == total_words - 1) {
+        word_end = inton->pitch_end;
+    }
+
+    /* Apply the contour */
+    apply_smooth_pitch_contour(samples, count, word_start, word_end);
+
+    /* Apply energy adjustment */
+    if (fabsf(energy - 1.0f) > 0.01f) {
+        for (size_t i = 0; i < count; i++) {
+            float s = samples[i] * energy;
+            if (s > 32767.0f) s = 32767.0f;
+            if (s < -32768.0f) s = -32768.0f;
+            samples[i] = (int16_t)s;
+        }
+    }
+}
+
+/* ============================================================================
+ * Enhanced Prosody Processing
  * ============================================================================ */
 
 typedef struct {
@@ -1975,6 +2589,8 @@ typedef struct {
     int word_count;
     float pitch_modifier;     /* Overall pitch adjustment */
     float duration_modifier;  /* Overall duration adjustment */
+    PhraseType phrase_type;
+    PhraseIntonation intonation;
 } ProsodyContext;
 
 /* Analyze text for prosody cues */
@@ -1984,9 +2600,13 @@ static void analyze_prosody(const char* text, ProsodyContext* ctx) {
     ctx->word_count = 0;
     ctx->pitch_modifier = 1.0f;
     ctx->duration_modifier = 1.0f;
+    ctx->phrase_type = PHRASE_DECLARATIVE;
 
     size_t len = strlen(text);
-    if (len == 0) return;
+    if (len == 0) {
+        ctx->intonation = get_phrase_intonation(ctx->phrase_type);
+        return;
+    }
 
     /* Count words */
     int in_word = 0;
@@ -1999,21 +2619,31 @@ static void analyze_prosody(const char* text, ProsodyContext* ctx) {
         }
     }
 
-    /* Check sentence-final punctuation */
+    /* Check sentence-final punctuation to determine phrase type */
     for (size_t i = len; i > 0; i--) {
         char c = text[i - 1];
         if (c == '?') {
             ctx->is_question = 1;
+            ctx->phrase_type = PHRASE_INTERROGATIVE;
             ctx->pitch_modifier = 1.05f;  /* Slightly higher overall pitch */
             break;
         } else if (c == '!') {
             ctx->is_exclamation = 1;
+            ctx->phrase_type = PHRASE_EXCLAMATORY;
             ctx->pitch_modifier = 1.08f;  /* Higher pitch, more energy */
             break;
+        } else if (c == ',' || c == ';') {
+            ctx->phrase_type = PHRASE_CONTINUATION;
+            break;
         } else if (c != ' ' && c != '\t' && c != '\n') {
-            break;  /* Found non-punctuation, non-whitespace */
+            /* Default to declarative */
+            ctx->phrase_type = PHRASE_DECLARATIVE;
+            break;
         }
     }
+
+    /* Get the intonation pattern for this phrase type */
+    ctx->intonation = get_phrase_intonation(ctx->phrase_type);
 }
 
 /* Apply question intonation (rising pitch at end) */
@@ -2661,6 +3291,9 @@ int ctts_synthesize(CTTS* engine, const char* text,
     /* Get config */
     CTTSConfig* config = &engine->config;
 
+    /* Load duration rules (if not already loaded) */
+    load_duration_rules("duration_rules.csv");
+
     /* Analyze prosody context from original text */
     ProsodyContext prosody;
     analyze_prosody(text, &prosody);
@@ -2729,19 +3362,12 @@ int ctts_synthesize(CTTS* engine, const char* text,
                 }
             }
 
-            /* Apply prosody effects to completed word */
+            /* Apply prosody effects to completed word using phrase intonation */
             if (buf.count > word_start_sample) {
-                /* Apply declination (gradual pitch/energy lowering through sentence) */
-                apply_declination(buf.data + word_start_sample,
-                                  buf.count - word_start_sample,
-                                  current_word_index, prosody.word_count);
-
-                /* Apply question intonation if needed */
-                if (prosody.is_question) {
-                    apply_question_intonation(buf.data, buf.count,
-                                              word_start_sample,
-                                              current_word_index, prosody.word_count);
-                }
+                apply_phrase_intonation(buf.data + word_start_sample,
+                                        buf.count - word_start_sample,
+                                        &prosody.intonation,
+                                        current_word_index, prosody.word_count);
             }
 
             /* Apply fade-out before silence if we have audio */
@@ -2920,19 +3546,12 @@ int ctts_synthesize(CTTS* engine, const char* text,
         }
     }
 
-    /* Apply prosody effects to the final word */
+    /* Apply prosody effects to the final word using phrase intonation */
     if (buf.count > word_start_sample) {
-        /* Apply declination to last word */
-        apply_declination(buf.data + word_start_sample,
-                          buf.count - word_start_sample,
-                          current_word_index, prosody.word_count);
-
-        /* Apply question intonation if needed (most important for final word) */
-        if (prosody.is_question) {
-            apply_question_intonation(buf.data, buf.count,
-                                      word_start_sample,
-                                      current_word_index, prosody.word_count);
-        }
+        apply_phrase_intonation(buf.data + word_start_sample,
+                                buf.count - word_start_sample,
+                                &prosody.intonation,
+                                current_word_index, prosody.word_count);
     }
 
     free(normalized);

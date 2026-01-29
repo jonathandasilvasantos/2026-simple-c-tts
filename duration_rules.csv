@@ -1,0 +1,53 @@
+# Duration Rules for Brazilian Portuguese
+# Format: phoneme_type,position,stress,duration_factor
+# position: 0=initial, 1=medial, 2=final
+# stress: 0=unstressed, 1=stressed
+# duration_factor: multiplier (1.0 = normal)
+
+# Vowels - stressed syllables are longer
+vowel,0,1,1.20
+vowel,1,1,1.15
+vowel,2,1,1.25
+vowel,0,0,0.90
+vowel,1,0,0.85
+vowel,2,0,1.10
+
+# Consonants - plosives
+plosive,0,1,1.00
+plosive,1,1,0.95
+plosive,2,1,1.05
+plosive,0,0,0.90
+plosive,1,0,0.85
+plosive,2,0,0.95
+
+# Consonants - fricatives
+fricative,0,1,1.10
+fricative,1,1,1.05
+fricative,2,1,1.15
+fricative,0,0,0.95
+fricative,1,0,0.90
+fricative,2,0,1.00
+
+# Consonants - nasals
+nasal,0,1,1.15
+nasal,1,1,1.10
+nasal,2,1,1.20
+nasal,0,0,0.95
+nasal,1,0,0.90
+nasal,2,0,1.05
+
+# Consonants - liquids (l, r)
+liquid,0,1,1.10
+liquid,1,1,1.05
+liquid,2,1,1.15
+liquid,0,0,0.95
+liquid,1,0,0.90
+liquid,2,0,1.00
+
+# Prepausal lengthening (word-final before pause)
+prepausal,2,1,1.30
+prepausal,2,0,1.20
+
+# Phrase-final lengthening
+phrase_final,2,1,1.35
+phrase_final,2,0,1.25
